@@ -57,12 +57,22 @@ void drawBottom()
 	put("\x1b[9;1Hcpu %5.1f ms  gpu %5.1f ms  drop %lu  ", (double)sms3ds_gx_cpu_ms, (double)sms3ds_gx_gpu_ms,
 	    (unsigned long)sms3ds_gx_dropped);
 	put("\x1b[10;1Htev approximations %10lu", (unsigned long)sms3ds_gx_tev_approx);
+	{
+		const float fr = sms3ds_prof_frame_ms, fl = sms3ds_prof_flush_ms, dc = sms3ds_prof_decode_ms,
+		            wt = sms3ds_prof_wait_ms;
+		float game = fr - fl - dc - wt;
+		if (game < 0.0f)
+			game = 0.0f;
+		// ms per frame: render = backend flushes (xform = CPU transform, tex = texture work)
+		put("\x1b[13;1Hframe %4.0f render %4.0f xform %4.0f  ", (double)fr, (double)fl, (double)sms3ds_prof_xform_ms);
+		put("\x1b[14;1Htex %3.0f dec %4.0f wait %3.0f game %4.0f  ", (double)sms3ds_prof_tex_ms, (double)dc,
+		    (double)wt, (double)game);
+	}
 	put("\x1b[11;1Happ mem free %6lu KiB  ", (unsigned long)(osGetMemRegionFree(MEMREGION_APPLICATION) >> 10));
 	put("\x1b[12;1Hheap %lu KiB, linear %lu KiB", (unsigned long)(envGetHeapSize() >> 10),
 	    (unsigned long)(envGetLinearHeapSize() >> 10));
-	put("\x1b[13;1Hgame state %-3d area %-3d episode %-3d  ", sms3ds_state, sms3ds_area, sms3ds_episode);
-	put("\x1b[14;1Hsave file  %-3d", sms3ds_save_file);
-	put("\x1b[15;1Hpad reads  %10lu  buttons %04x", (unsigned long)sms3ds_pad_reads, (unsigned)sms3ds_pad_buttons);
+	put("\x1b[15;1Hstate %d area %d ep %d file %d  pad %04x   ", sms3ds_state, sms3ds_area, sms3ds_episode,
+	    sms3ds_save_file, (unsigned)sms3ds_pad_buttons);
 	put("\x1b[17;1H\x1b[7m log  (START+SELECT: quit)               \x1b[0m");
 }
 

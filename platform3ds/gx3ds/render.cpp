@@ -19,7 +19,8 @@
 
 namespace gx {
 uint32_t g_displayFrames;
-bool g_gxStats;
+bool g_gxStats = true;  // gx_fifo.cpp times its vertex loader (g_decodeSeconds) for the HUD
+extern double g_decodeSeconds;
 double g_flushSeconds;
 uint32_t g_traceLastVat;
 }  // namespace gx
@@ -28,6 +29,8 @@ volatile uint32_t sms3ds_gx_batches_per_frame;
 volatile uint32_t sms3ds_gx_vertices_per_frame;
 volatile uint32_t sms3ds_gx_dropped;
 volatile float sms3ds_gx_cpu_ms, sms3ds_gx_gpu_ms;
+volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xform_ms, sms3ds_prof_tex_ms,
+    sms3ds_prof_wait_ms, sms3ds_prof_decode_ms;
 
 namespace gx3ds {
 namespace {
@@ -56,6 +59,11 @@ bool s_clearPending = true;
 u32 s_clearColor = 0x000000FF, s_clearDepth = 0xFFFFFF;
 uint32_t s_frameBatches, s_frameVerts;
 
+// Per-frame profile (system ticks, 268 MHz), published to the HUD at each display copy.
+u64 s_tFlush, s_tXform, s_tTex, s_tWait, s_lastPresent;
+double s_decodeAtPresent;
+inline float ticksMs(u64 t) { return (float)((double)t * 1000.0 / SYSCLOCK_ARM11); }
+
 const u32 kTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
                            GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
@@ -64,7 +72,9 @@ void beginFrame()
 {
 	if (s_inFrame)
 		return;
+	const u64 t0 = svcGetSystemTick();
 	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+	s_tWait += svcGetSystemTick() - t0;
 	C3D_FrameDrawOn(s_target);
 	s_vertUsed = s_idxUsed = 0;
 	if (s_clearPending) {
@@ -351,6 +361,7 @@ void flushBatch()
 		resetBatch();
 		return;
 	}
+	const u64 tStart = svcGetSystemTick();
 	beginFrame();
 	const size_t vbytes = (size_t)s_count * sizeof(OutVertex), ibytes = s_idx.size() * sizeof(uint16_t);
 	if (s_vertUsed + vbytes > kVertRing || s_idxUsed + ibytes > kIdxRing) {
@@ -362,9 +373,14 @@ void flushBatch()
 	TevPlan plan;
 	setupTev(plan);
 	OutVertex* ov = (OutVertex*)(s_vertRing + s_vertUsed);
+	const u64 tx0 = svcGetSystemTick();
 	transform(s_verts.data(), s_count, s_fmt, s_stride, plan.coord, plan.units, ov);
+	const u64 tx1 = svcGetSystemTick();
 	for (int u = 0; u < plan.units; u++)
 		C3D_TexBind(u, textureForMap(plan.map[u]));
+	const u64 tx2 = svcGetSystemTick();
+	s_tXform += tx1 - tx0;
+	s_tTex += tx2 - tx1;
 	uint16_t* oi = (uint16_t*)(s_idxRing + s_idxUsed);
 	for (size_t i = 0; i < s_idx.size(); i++)
 		oi[i] = (uint16_t)s_idx[i];
@@ -378,6 +394,7 @@ void flushBatch()
 	s_frameBatches++;
 	s_frameVerts += s_count;
 	resetBatch();
+	s_tFlush += svcGetSystemTick() - tStart;
 }
 
 void executeCopy(uint32_t ctrl)
@@ -394,6 +411,18 @@ void executeCopy(uint32_t ctrl)
 			sms3ds_gx_cpu_ms = C3D_GetProcessingTime();
 			sms3ds_gx_gpu_ms = C3D_GetDrawingTime();
 		}
+		const u64 now = svcGetSystemTick();
+		if (s_lastPresent) {
+			sms3ds_prof_frame_ms = ticksMs(now - s_lastPresent);
+			sms3ds_prof_flush_ms = ticksMs(s_tFlush);
+			sms3ds_prof_xform_ms = ticksMs(s_tXform);
+			sms3ds_prof_tex_ms = ticksMs(s_tTex);
+			sms3ds_prof_wait_ms = ticksMs(s_tWait);
+			sms3ds_prof_decode_ms = (float)((g_decodeSeconds - s_decodeAtPresent) * 1000.0);
+		}
+		s_lastPresent = now;
+		s_decodeAtPresent = g_decodeSeconds;
+		s_tFlush = s_tXform = s_tTex = s_tWait = 0;
 		sms3ds_gx_batches_per_frame = s_frameBatches;
 		sms3ds_gx_vertices_per_frame = s_frameVerts;
 		s_frameBatches = s_frameVerts = 0;
