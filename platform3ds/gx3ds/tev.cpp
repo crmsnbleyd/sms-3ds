@@ -7,7 +7,7 @@
 // recognising the shape of its lerp (zero/one operands); registers never written in the draw and
 // konst colours become the stage constant. What does not fit (more than 6 stages or 3 textures,
 // two different constants in a stage, compare mode, indirect texturing, bias +0.5, scale 1/2, a
-// general d + lerp) gets the nearest drawable form and is counted in sms3ds_gx_tev_approx.
+// general d + lerp) gets the nearest drawable form, noted in TevPlan::why (AX_*).
 // Register and konst encodings follow sms-pc-port's gx_shader.cpp / gx_render.cpp (MIT, NOTICE).
 #include "gx3ds.h"
 
@@ -15,8 +15,6 @@
 
 #include "gx_internal.h"
 #include "sms3ds.h"
-
-volatile uint32_t sms3ds_gx_tev_approx;
 
 namespace gx3ds {
 namespace {
@@ -81,7 +79,7 @@ struct StageCtx {
 	int unit;               // texture unit of this stage's map, or -1
 	uint32_t swapRas, swapTex;  // swap tables (2 bits per component: r g b a)
 	uint32_t kcsel, kasel;
-	bool approx;
+	uint32_t approx;  // AX_*
 };
 
 In regIn(StageCtx& c, int reg, bool alphaOnly)
@@ -131,14 +129,14 @@ In colorIn(StageCtx& c, uint32_t id)
 		r = In{K_SRC, (GPU_TEVSRC)(GPU_TEXTURE0 + c.unit), -1, {0, 0, 0, 0}};
 		r.sel = id == 9 ? swapSel(c.swapTex, true, ok) : swapSel(c.swapTex, false, ok);
 		if (!ok)
-			c.approx = true;
+			c.approx |= AX_SWAP;
 		return r;
 	case 10:
 	case 11:
 		r = In{K_SRC, GPU_PRIMARY_COLOR, -1, {0, 0, 0, 0}};
 		r.sel = id == 11 ? swapSel(c.swapRas, true, ok) : swapSel(c.swapRas, false, ok);
 		if (!ok)
-			c.approx = true;
+			c.approx |= AX_SWAP;
 		return r;
 	case 12: r.kind = K_ONE; return r;
 	case 13: r.kind = K_CONST; memset(r.rgba, 128, 4); return r;
@@ -211,12 +209,12 @@ void place(StageCtx& c, ConstSlot& k, const In& in, bool alpha, bool oneMinus, G
 	if (i.kind == K_CONST) {
 		if (alpha) {
 			if (k.aUsed && k.rgba[3] != i.rgba[3])
-				c.approx = true;
+				c.approx |= AX_CONST2;
 			k.aUsed = true;
 			k.rgba[3] = i.rgba[3];
 		} else {
 			if (k.rgbUsed && memcmp(k.rgba, i.rgba, 3) != 0)
-				c.approx = true;
+				c.approx |= AX_CONST2;
 			k.rgbUsed = true;
 			memcpy(k.rgba, i.rgba, 3);
 		}
@@ -265,15 +263,15 @@ void compileChan(StageCtx& c, ConstSlot& k, uint32_t env, bool alpha, Chan& out)
 	}
 	out.scale = scale == 1 ? GPU_TEVSCALE_2 : scale == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1;
 	if (scale == 3)
-		c.approx = true;  // x0.5
-	if (bias == 3) {     // compare mode: pass d through
-		c.approx = true;
+		c.approx |= AX_SCALE_HALF;
+	if (bias == 3) {  // compare mode: pass d through
+		c.approx |= AX_COMPARE;
 		place(c, k, d, alpha, false, out.src[0], out.op[0]);
 		out.func = GPU_REPLACE;
 		return;
 	}
 	if (bias == 1)
-		c.approx = true;  // +0.5
+		c.approx |= AX_BIAS_HALF;
 
 	// the lerp's value v and how to combine it with d
 	const bool dz = isZero(d, alpha);
@@ -311,7 +309,7 @@ void compileChan(StageCtx& c, ConstSlot& k, uint32_t env, bool alpha, Chan& out)
 			place(c, k, v1, alpha, false, out.src[1], out.op[1]);
 			out.func = sub ? GPU_SUBTRACT : (bias == 2 ? GPU_ADD_SIGNED : GPU_ADD);
 			if (bias == 2 && sub)
-				c.approx = true;
+				c.approx |= AX_SIGNED;
 			return;
 		}
 	} else if (vk == V_PRODUCT) {
@@ -323,7 +321,7 @@ void compileChan(StageCtx& c, ConstSlot& k, uint32_t env, bool alpha, Chan& out)
 			place(c, k, d, alpha, false, out.src[2], out.op[2]);
 			out.func = GPU_MULTIPLY_ADD;
 			if (sub)
-				c.approx = true;
+				c.approx |= AX_SUB;
 		}
 	} else {  // general lerp: INTERPOLATE(b, a, c) = b*c + a*(1-c)
 		place(c, k, b, alpha, false, out.src[0], out.op[0]);
@@ -331,10 +329,10 @@ void compileChan(StageCtx& c, ConstSlot& k, uint32_t env, bool alpha, Chan& out)
 		place(c, k, cc, alpha, false, out.src[2], out.op[2]);
 		out.func = GPU_INTERPOLATE;
 		if (!dz)
-			c.approx = true;  // d dropped
+			c.approx |= AX_LERP_D;
 	}
 	if (bias == 2)
-		c.approx = true;
+		c.approx |= AX_SIGNED;
 }
 
 }  // namespace
@@ -344,7 +342,7 @@ void setupTev(TevPlan& plan)
 	const uint32_t gen = g.bp[BP_GENMODE];
 	const uint32_t nst = ((gen >> 10) & 15) + 1;
 	const uint32_t nind = (gen >> 16) & 7;
-	bool approx = nst > 6 || nind > 0;
+	uint32_t approx = (nst > 6 ? AX_STAGES : 0) | (nind > 0 ? AX_INDIRECT : 0);
 
 	// texture units: distinct (map, coord) pairs in order of use
 	plan.units = 0;
@@ -365,7 +363,7 @@ void setupTev(TevPlan& plan)
 			plan.coord[u] = coord;
 		}
 		if (u < 0)
-			approx = true;
+			approx |= AX_UNITS;
 		stageUnit[s] = u;
 	}
 
@@ -386,8 +384,8 @@ void setupTev(TevPlan& plan)
 		};
 		const uint32_t ord = (g.bp[BP_TREF + (s >> 1)] >> ((s & 1) * 12)) & 0x3FF;
 		if (((ord >> 7) & 7) == 1)
-			approx = true;  // rasterised colour from channel 1: shown as channel 0
-		StageCtx c{&regs, stageUnit[s], swapTable(rswap), swapTable(tswap), ksel & 31, ksel >> 5, false};
+			approx |= AX_CHAN1;  // shown as channel 0
+		StageCtx c{&regs, stageUnit[s], swapTable(rswap), swapTable(tswap), ksel & 31, ksel >> 5, 0};
 		ConstSlot k{false, false, {0, 0, 0, 0}};
 		Chan col, alp;
 		compileChan(c, k, cenv, false, col);
@@ -406,7 +404,7 @@ void setupTev(TevPlan& plan)
 		// destination: PREV becomes the PICA output; another register written is not tracked
 		const uint32_t cdst = (cenv >> 22) & 3, adst = (aenv >> 22) & 3;
 		if (cdst != 0 || adst != 0)
-			approx = true;
+			approx |= AX_DEST;
 		regs.written[0] = true;
 		approx |= c.approx;
 	}
@@ -437,13 +435,12 @@ void setupTev(TevPlan& plan)
 		C3D_AlphaTest(false, GPU_ALWAYS, 0);
 	else {
 		C3D_AlphaTest(true, kCmp[c0], (int)ref0);
-		approx = true;
+		approx |= AX_ALPHA_TEST;
 	}
 
 	if ((g.bp[BP_FOG3] >> 21) & 7)
-		approx = true;  // fog: later
-	if (approx)
-		sms3ds_gx_tev_approx = sms3ds_gx_tev_approx + 1;
+		approx |= AX_FOG;  // fog: later
+	plan.why = approx;
 }
 
 }  // namespace gx3ds

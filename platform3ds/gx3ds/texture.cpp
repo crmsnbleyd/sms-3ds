@@ -52,13 +52,7 @@ const uint8_t kTileW[16] = {8, 8, 8, 4, 4, 4, 4, 0, 8, 8, 4, 0, 0, 0, 8, 0};
 const uint8_t kTileH[16] = {8, 4, 4, 4, 4, 4, 4, 0, 8, 4, 4, 0, 0, 0, 8, 0};
 const uint8_t kTileBytes[16] = {32, 32, 32, 32, 32, 32, 64, 0, 32, 32, 32, 0, 0, 0, 32, 0};
 
-uint32_t levelBytes(uint32_t fmt, uint32_t w, uint32_t h)
-{
-	fmt &= 15;
-	if (!kTileW[fmt])
-		return 0;
-	return ((w + kTileW[fmt] - 1) / kTileW[fmt]) * ((h + kTileH[fmt] - 1) / kTileH[fmt]) * kTileBytes[fmt];
-}
+uint32_t levelBytes(uint32_t fmt, uint32_t w, uint32_t h) { return gxTexBytes(fmt, w, h); }
 void palette(const uint8_t* tlut, uint32_t tlutFmt, uint32_t idx, uint8_t* o)
 {
 	uint16_t v = be16(tlut + 2 * idx);
@@ -303,7 +297,29 @@ bool convert(Entry& e, const uint8_t* src, uint32_t fmt, uint32_t w, uint32_t h,
 
 }  // namespace
 
-// The texture for GX map `map` with its sampler state applied, or a 1x1 white texture.
+uint32_t gxTexBytes(uint32_t fmt, uint32_t w, uint32_t h)
+{
+	fmt &= 15;
+	if (!kTileW[fmt])
+		return 0;
+	return ((w + kTileW[fmt] - 1) / kTileW[fmt]) * ((h + kTileH[fmt] - 1) / kTileH[fmt]) * kTileBytes[fmt];
+}
+
+namespace {
+// GX map `map`'s wrap and filter (TX_MODE0) on `t`.
+C3D_Tex* withSampler(C3D_Tex* t, uint32_t mode0)
+{
+	static const GPU_TEXTURE_WRAP_PARAM kWrap[4] = {GPU_CLAMP_TO_EDGE, GPU_REPEAT, GPU_MIRRORED_REPEAT, GPU_REPEAT};
+	C3D_TexSetWrap(t, kWrap[mode0 & 3], kWrap[(mode0 >> 2) & 3]);
+	const GPU_TEXTURE_FILTER_PARAM mag = (mode0 >> 4) & 1 ? GPU_LINEAR : GPU_NEAREST;
+	const GPU_TEXTURE_FILTER_PARAM min = ((mode0 >> 5) & 4) ? GPU_LINEAR : GPU_NEAREST;
+	C3D_TexSetFilter(t, mag, min);
+	return t;
+}
+}  // namespace
+
+// The texture for GX map `map` with its sampler state applied: an EFB copy drawn there, the
+// texture converted from RAM, or an 8x8 white texture.
 C3D_Tex* textureForMap(int map)
 {
 	if (!s_whiteInit) {
@@ -317,6 +333,8 @@ C3D_Tex* textureForMap(int map)
 	const uint32_t tlutReg = g.bp[bpTexReg(BP_TX_TLUT, map)];
 	const uint32_t w = (img0 & 0x3FF) + 1, h = ((img0 >> 10) & 0x3FF) + 1, fmt = (img0 >> 20) & 15;
 	const uint8_t* ptr = g.texImage[map];
+	if (C3D_Tex* ct = copyTexture(ptr))
+		return withSampler(ct, mode0);
 	if (!ptr || !levelBytes(fmt, w, h))
 		return &s_white;
 
@@ -341,12 +359,7 @@ C3D_Tex* textureForMap(int map)
 				evictOld();
 		}
 	}
-	static const GPU_TEXTURE_WRAP_PARAM kWrap[4] = {GPU_CLAMP_TO_EDGE, GPU_REPEAT, GPU_MIRRORED_REPEAT, GPU_REPEAT};
-	C3D_TexSetWrap(&e.tex, kWrap[mode0 & 3], kWrap[(mode0 >> 2) & 3]);
-	const GPU_TEXTURE_FILTER_PARAM mag = (mode0 >> 4) & 1 ? GPU_LINEAR : GPU_NEAREST;
-	const GPU_TEXTURE_FILTER_PARAM min = ((mode0 >> 5) & 4) ? GPU_LINEAR : GPU_NEAREST;
-	C3D_TexSetFilter(&e.tex, mag, min);
-	return &e.tex;
+	return withSampler(&e.tex, mode0);
 }
 
 }  // namespace gx3ds

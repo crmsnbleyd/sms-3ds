@@ -17,11 +17,34 @@ struct OutVertex {
 };
 static_assert(sizeof(OutVertex) == 44, "PICA vertex layout");
 
+// Why a batch is drawn approximately (TevPlan::why, g_vtxWhy); the HUD and the frame dump show them.
+enum : uint32_t {
+	AX_STAGES = 1u << 0,      // more than 6 TEV stages
+	AX_INDIRECT = 1u << 1,    // indirect texturing
+	AX_UNITS = 1u << 2,       // more than 3 texture (map, coordinate) pairs
+	AX_SWAP = 1u << 3,        // a swap table that is neither identity nor a broadcast
+	AX_CONST2 = 1u << 4,      // two different constants in one stage
+	AX_SCALE_HALF = 1u << 5,  // scale 1/2
+	AX_COMPARE = 1u << 6,     // compare mode
+	AX_BIAS_HALF = 1u << 7,   // bias +1/2
+	AX_SIGNED = 1u << 8,      // bias -1/2 outside d + v
+	AX_SUB = 1u << 9,         // d - a*b
+	AX_LERP_D = 1u << 10,     // d + lerp(a, b, c): d dropped
+	AX_CHAN1 = 1u << 11,      // rasterised colour from channel 1 (shown as channel 0)
+	AX_DEST = 1u << 12,       // a stage writes C0..C2
+	AX_ALPHA_TEST = 1u << 13, // two alpha tests
+	AX_FOG = 1u << 14,        // fog
+	AX_LIGHT = 1u << 15,      // vtx.cpp: lighting
+	AX_TEXGEN = 1u << 16,     // vtx.cpp: texgen
+	AX_COPY = 1u << 17,       // render.cpp: an EFB copy's format (depth, intensity)
+};
+
 // tev.cpp: what the current TEV needs, and the combiners set up for it (setupTev).
 struct TevPlan {
 	int units;       // texture units used (0..3)
 	int map[3];      // GX texture map per unit
 	int coord[3];    // GX texture coordinate per unit
+	uint32_t why;    // AX_* approximations made
 };
 void setupTev(TevPlan& plan);
 
@@ -31,9 +54,14 @@ void setupTev(TevPlan& plan);
 void vtxInit(shaderProgram_s* prog);
 void vtxInvalidate();  // another program changed the vertex uniforms
 bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* base);
+extern uint32_t g_vtxWhy;  // AX_* approximations made by the last vtxSetup
 
 // texture.cpp: GX texture map `map` (0..7) as a PICA texture with its wrap/filter state, or white.
 C3D_Tex* textureForMap(int map);
+uint32_t gxTexBytes(uint32_t fmt, uint32_t w, uint32_t h);  // bytes of one GX texture level
+
+// render.cpp: the texture an EFB copy (GXCopyTex) last drew for destination `ptr`, or null.
+C3D_Tex* copyTexture(const void* ptr);
 
 // The GameCube picture (640 x 480 of the 640 x 528 EFB) is shown 4:3, letterboxed in the 400 x 240
 // top screen: EFB pixels are halved and offset by 40 screen columns.

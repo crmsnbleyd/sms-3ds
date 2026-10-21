@@ -56,7 +56,8 @@ void drawBottom()
 	    (unsigned long)sms3ds_gx_vertices_per_frame);
 	put("\x1b[9;1Hcpu %5.1f ms  gpu %5.1f ms  drop %lu  ", (double)sms3ds_gx_cpu_ms, (double)sms3ds_gx_gpu_ms,
 	    (unsigned long)sms3ds_gx_dropped);
-	put("\x1b[10;1Htev approximations %10lu", (unsigned long)sms3ds_gx_tev_approx);
+	put("\x1b[10;1Happrox %9lu  why %05lx    ", (unsigned long)sms3ds_gx_tev_approx,
+	    (unsigned long)sms3ds_gx_approx_why);
 	{
 		const float fr = sms3ds_prof_frame_ms, fl = sms3ds_prof_flush_ms, dc = sms3ds_prof_decode_ms,
 		            wt = sms3ds_prof_wait_ms;
@@ -73,7 +74,7 @@ void drawBottom()
 	    (unsigned long)(envGetLinearHeapSize() >> 10));
 	put("\x1b[15;1Hstate %d area %d ep %d file %d  pad %04x   ", sms3ds_state, sms3ds_area, sms3ds_episode,
 	    sms3ds_save_file, (unsigned)sms3ds_pad_buttons);
-	put("\x1b[17;1H\x1b[7m log  (START+SELECT: quit)               \x1b[0m");
+	put("\x1b[17;1H\x1b[7m log  (START+SELECT quit, L+R+X dump)    \x1b[0m");
 }
 
 void hudThread(void*)
@@ -85,6 +86,8 @@ void hudThread(void*)
 			fflush(stderr);
 			svcExitProcess();
 		}
+		if ((held & KEY_L) && (held & KEY_R) && (held & KEY_X) && !sms3ds_gx_dump_request)
+			sms3ds_gx_dump_request = 1;
 		drawBottom();
 		drawLog();
 		gfxFlushBuffers();

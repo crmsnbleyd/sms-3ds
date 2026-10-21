@@ -12,7 +12,10 @@
 
 #include <3ds.h>
 #include <citro3d.h>
+#include <stdio.h>
 #include <string.h>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "gx_internal.h"
@@ -32,6 +35,7 @@ volatile uint32_t sms3ds_gx_batches_per_frame;
 volatile uint32_t sms3ds_gx_vertices_per_frame;
 volatile uint32_t sms3ds_gx_dropped;
 volatile float sms3ds_gx_cpu_ms, sms3ds_gx_gpu_ms;
+volatile uint32_t sms3ds_gx_tev_approx, sms3ds_gx_approx_why, sms3ds_gx_dump_request;
 volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xform_ms, sms3ds_prof_tex_ms,
     sms3ds_prof_wait_ms, sms3ds_prof_decode_ms;
 
@@ -66,6 +70,8 @@ bool s_clearPending = true;
 u32 s_clearColor = 0x000000FF, s_clearDepth = 0xFFFFFF;
 uint32_t s_frameBatches, s_frameVerts;
 bool s_lastPixelValid;  // the pixel state set up for the previous batch still holds (flushBatch)
+uint32_t s_frameWhy;    // AX_* approximations made this frame
+bool s_efbDirty = true; // drawn or cleared since the last snapshot for a texture copy
 
 // Per-frame profile (system ticks, 268 MHz), published to the HUD at each display copy.
 u64 s_tFlush, s_tXform, s_tTex, s_tWait, s_lastPresent;  // xform: vertex set-up (attributes, uniforms)
@@ -76,6 +82,8 @@ const u32 kTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
                            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
                            GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
+void freeRetired();
+
 void beginFrame()
 {
 	if (s_inFrame)
@@ -85,11 +93,13 @@ void beginFrame()
 	// on its own retrace timer (vi.cpp). Waits only while the GPU still draws the previous frame.
 	C3D_FrameBegin(0);
 	s_tWait += svcGetSystemTick() - t0;
+	freeRetired();  // the GPU finished the frames that used them
 	C3D_FrameDrawOn(s_target);
 	s_vertUsed = s_idxUsed = 0;
 	if (s_clearPending) {
 		C3D_RenderTargetClear(s_target, C3D_CLEAR_ALL, s_clearColor, s_clearDepth);
 		s_clearPending = false;
+		s_efbDirty = true;
 	}
 	s_inFrame = true;
 }
@@ -215,6 +225,254 @@ void drawSideBars()
 	s_lastPixelValid = false;
 }
 
+// --- EFB texture copies (GXCopyTex) ---------------------------------------------------------------
+// The copied rectangle of the render target is drawn into a texture registered by its destination
+// address, and textureForMap samples that texture in place of the RAM there until the CPU writes to
+// that RAM. The render target cannot be sampled in place (240-pixel rows are not a texture width),
+// so GX_TextureCopy first lays its tiles into s_efbTex, a 256 x 512 texture with 16 spare columns.
+//
+// Orientation: a render target's window row y is memory row H - 1 - y (as the top screen shows it),
+// and a texture's coordinate t samples memory row (1 - t) * H, so what is drawn at window row y is
+// sampled at t = y / H. EFB pixel (ex, ey) is at window (240 - ey / 2, 360 - ex / 2) (vtx.cpp setFinal).
+struct CopyTex {
+	C3D_Tex tex;
+	C3D_RenderTarget* rt = nullptr;
+	uint32_t clock = 0, bytes = 0;
+};
+std::unordered_map<const void*, CopyTex> s_copies;
+std::vector<CopyTex> s_retired;  // replaced while a frame in flight may still sample them
+C3D_Tex s_efbTex;
+bool s_efbTexOk;
+
+void freeRetired()
+{
+	for (CopyTex& c : s_retired) {
+		C3D_RenderTargetDelete(c.rt);
+		C3D_TexDelete(&c.tex);
+	}
+	s_retired.clear();
+}
+
+uint32_t potClamp(uint32_t v)
+{
+	uint32_t p = 8;
+	while (p < v && p < 1024)
+		p <<= 1;
+	return p;
+}
+
+// The GX texture layout a copy format writes (sms-pc-port gx_texture.cpp copyLayout).
+uint32_t copyLayout(uint32_t f, bool z)
+{
+	switch (f) {
+	case 0: return 0;
+	case 2: return 2;
+	case 3: case 11: case 12: return 3;
+	case 4: return z ? 3 : 4;
+	case 5: return 5;
+	case 6: return 6;
+	default: return 1;
+	}
+}
+
+void copyToTexture(uint32_t ctrl)
+{
+	const void* dest = g.copyDest;
+	if (!dest || !s_efbTexOk)
+		return;
+	const uint32_t tl = g.bp[BP_COPY_SRC_TL], wh = g.bp[BP_COPY_SRC_WH];
+	const float x0 = float(tl & 0x3FF), y0 = float((tl >> 10) & 0x3FF);
+	const uint32_t w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
+	const bool half = (ctrl >> 9) & 1;
+	const uint32_t fmt = ((ctrl >> 3) & 1) << 3 | ((ctrl >> 4) & 7);
+	const bool zcopy = (g.bp[BP_PE_CONTROL] & 7) == 3;
+	const bool alphaOne = (g.bp[BP_PE_CONTROL] & 7) != 1;  // no alpha in the EFB: copies read 1
+	const uint32_t tw = half ? (w + 1) / 2 : w, th = half ? (h + 1) / 2 : h;
+	// the copy at the render target's resolution (half the EFB's), as a power-of-two texture
+	const uint32_t pw = potClamp((w + 1) / 2), ph = potClamp((h + 1) / 2);
+
+	CopyTex& c = s_copies[dest];
+	if (c.rt && (c.tex.width != pw || c.tex.height != ph)) {
+		s_retired.push_back(c);
+		c.rt = nullptr;
+	}
+	if (!c.rt) {
+		if (!C3D_TexInitVRAM(&c.tex, (u16)pw, (u16)ph, GPU_RGBA8)) {
+			fprintf(stderr, "[gx3ds] texture copy %ux%u to %p: no VRAM (%lu KiB free)\n", (unsigned)pw, (unsigned)ph,
+			        dest, (unsigned long)(vramSpaceFree() >> 10));
+			s_copies.erase(dest);
+			return;
+		}
+		c.rt = C3D_RenderTargetCreateFromTex(&c.tex, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(-1));
+		if (!c.rt) {
+			C3D_TexDelete(&c.tex);
+			s_copies.erase(dest);
+			return;
+		}
+		fprintf(stderr, "[gx3ds] texture copy (%g,%g) %ux%u fmt %u%s%s to %p: %ux%u texture\n", (double)x0, (double)y0,
+		        (unsigned)w, (unsigned)h, (unsigned)fmt, zcopy ? " depth" : "", half ? " half" : "", dest,
+		        (unsigned)pw, (unsigned)ph);
+	}
+	c.bytes = gxTexBytes(copyLayout(fmt, zcopy), tw, th);
+	c.clock = writeClock();
+
+	if (zcopy) {  // depth copies: far everywhere for now
+		C3D_RenderTargetClear(c.rt, C3D_CLEAR_COLOR, 0xFFFFFFFF, 0);
+		s_frameWhy |= AX_COPY;
+		return;
+	}
+	if (((ctrl >> 15) & 3) == 3)
+		s_frameWhy |= AX_COPY;  // intensity: the colour as it is
+
+	if (s_vertUsed + 4 * sizeof(OutVertex) > kVertRing || s_idxUsed + 6 * sizeof(uint16_t) > kIdxRing)
+		return;
+	// the frame so far, laid out as a texture
+	if (s_efbDirty) {
+		const u32 line = kScreenH * 8 * 4 / 16;  // one row of 8x8 RGBA8 tiles, in 16-byte units
+		C3D_SyncTextureCopy((u32*)s_target->frameBuf.colorBuf, GX_BUFFER_DIM(line, 0), (u32*)s_efbTex.data,
+		                    GX_BUFFER_DIM(line, (256 - kScreenH) * 8 * 4 / 16), kScreenH * kScreenW * 4,
+		                    GX_TRANSFER_RAW_COPY(1));
+		s_efbDirty = false;
+	}
+
+	OutVertex* v = (OutVertex*)(s_vertRing + s_vertUsed);
+	uint16_t* ix = (uint16_t*)(s_idxRing + s_idxUsed);
+	for (int i = 0; i < 4; i++) {
+		const float X = (i & 1) ? 1.0f : -1.0f, Y = (i & 2) ? 1.0f : -1.0f;
+		const float sx = (X + 1.0f) * 0.5f, ty = (Y + 1.0f) * 0.5f;  // the copy's (s, t) there
+		const float ex = x0 + sx * w, ey = y0 + ty * h;
+		const float wx = kScreenH - ey * 0.5f, wy = (kScreenW - kLetterbox) - ex * 0.5f;
+		OutVertex& o = v[i];
+		o.pos[0] = X;
+		o.pos[1] = Y;
+		o.pos[2] = -0.5f;
+		o.pos[3] = 1.0f;
+		memset(o.clr, 255, 4);
+		memset(o.tc, 0, sizeof o.tc);
+		o.tc[0][0] = wx / 256.0f;
+		o.tc[0][1] = (wy + (512.0f - kScreenW)) / 512.0f;
+	}
+	const uint16_t q[6] = {0, 1, 2, 1, 3, 2};
+	memcpy(ix, q, sizeof q);
+	s_vertUsed += (4 * sizeof(OutVertex) + 15) & ~(size_t)15;
+	s_idxUsed += (6 * sizeof(uint16_t) + 15) & ~(size_t)15;
+
+	C3D_FrameDrawOn(c.rt);
+	C3D_BindProgram(&s_prog);
+	C3D_AttrInfo* ai = C3D_GetAttrInfo();
+	AttrInfo_Init(ai);
+	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
+	AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 2);
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_ALL);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+	C3D_TexSetFilter(&s_efbTex, GPU_LINEAR, GPU_LINEAR);
+	C3D_TexSetWrap(&s_efbTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+	C3D_TexBind(0, &s_efbTex);
+	C3D_TexEnv* env = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(env);
+	C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+	C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+	C3D_TexEnvSrc(env, C3D_Alpha, alphaOne ? GPU_CONSTANT : GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+	C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+	C3D_TexEnvColor(env, 0xFFFFFFFF);
+	for (int st = 1; st < 6; st++) {
+		C3D_TexEnv* e = C3D_GetTexEnv(st);
+		C3D_TexEnvInit(e);
+		C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+	}
+	C3D_BufInfo* bi = C3D_GetBufInfo();
+	BufInfo_Init(bi);
+	BufInfo_Add(bi, v, sizeof(OutVertex), 5, 0x43210);
+	C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, ix);
+	C3D_FrameDrawOn(s_target);
+	C3D_BindProgram(&s_gxProg);
+	vtxInvalidate();
+	s_lastPixelValid = false;
+}
+
+// --- frame dump (hold L+R+X): the GX state of each distinct batch of one frame -------------------------
+FILE* s_dump;
+std::unordered_set<uint64_t> s_dumpSeen;
+uint32_t s_dumpBatches;
+
+void dumpBatch(const TevPlan& plan, uint32_t why)
+{
+	s_dumpBatches++;
+	uint32_t key[160];
+	int n = 0;
+	for (int r = 0x09; r <= 0x12; r++)
+		key[n++] = g.xfReg[r];
+	key[n++] = g.xfReg[XFR_NUMTEXGENS];
+	for (int i = 0; i < 8; i++)
+		key[n++] = g.xfReg[XFR_TEXGEN + i];
+	for (int r = 0; r < 0x100; r++)
+		if ((r >= 0xC0 && r < 0x100) || r == BP_GENMODE || (r >= BP_ZMODE && r <= BP_PE_CONTROL) || r == 0x28 ||
+		    r == 0x29 || r == 0x2A || r == 0x2B)
+			if (n < 150)
+				key[n++] = g.bp[r];
+	key[n++] = s_fmt;
+	for (int u = 0; u < plan.units; u++) {
+		key[n++] = g.bp[bpTexReg(BP_TX_IMAGE0, plan.map[u])];
+		key[n++] = (uint32_t)(uintptr_t)g.texImage[plan.map[u]];
+	}
+	const uint64_t h = hashBytes(key, (size_t)n * 4);
+	if (!s_dumpSeen.insert(h).second)
+		return;
+	FILE* f = s_dump;
+	fprintf(f, "\nbatch %lu: fmt %05lx stride %lu verts %lu why %05lx\n", (unsigned long)s_dumpBatches,
+	        (unsigned long)s_fmt, (unsigned long)s_stride, (unsigned long)s_count, (unsigned long)why);
+	fprintf(f, " xf chans %lu c0 %04lx a0 %04lx c1 %04lx a1 %04lx amb0 %08lx mat0 %08lx amb1 %08lx mat1 %08lx\n",
+	        (unsigned long)g.xfReg[XFR_NUMCHANS], (unsigned long)g.xfReg[XFR_COLOR0CTRL],
+	        (unsigned long)g.xfReg[XFR_ALPHA0CTRL], (unsigned long)g.xfReg[XFR_COLOR0CTRL + 1],
+	        (unsigned long)g.xfReg[XFR_ALPHA0CTRL + 1], (unsigned long)g.xfReg[XFR_AMB0],
+	        (unsigned long)g.xfReg[XFR_MAT0], (unsigned long)g.xfReg[XFR_AMB0 + 1], (unsigned long)g.xfReg[XFR_MAT0 + 1]);
+	const uint32_t ntg = g.xfReg[XFR_NUMTEXGENS] & 15;
+	fprintf(f, " texgens %lu:", (unsigned long)ntg);
+	for (uint32_t i = 0; i < ntg && i < 8; i++)
+		fprintf(f, " %06lx", (unsigned long)g.xfReg[XFR_TEXGEN + i]);
+	fprintf(f, "  matidx %08lx %08lx\n", (unsigned long)g.xfReg[XFR_MATIDX_A], (unsigned long)g.xfReg[XFR_MATIDX_B]);
+	const uint32_t gen = g.bp[BP_GENMODE], nst = ((gen >> 10) & 15) + 1;
+	fprintf(f, " genmode %06lx stages %lu ind %lu zmode %06lx cmode0 %06lx cmode1 %06lx pe %06lx alpha %06lx fog3 %06lx\n",
+	        (unsigned long)gen, (unsigned long)nst, (unsigned long)((gen >> 16) & 7), (unsigned long)g.bp[BP_ZMODE],
+	        (unsigned long)g.bp[BP_CMODE0], (unsigned long)g.bp[BP_CMODE1], (unsigned long)g.bp[BP_PE_CONTROL],
+	        (unsigned long)g.bp[BP_ALPHACOMPARE], (unsigned long)g.bp[BP_FOG3]);
+	for (uint32_t st = 0; st < nst; st++) {
+		const uint32_t ord = (g.bp[BP_TREF + (st >> 1)] >> ((st & 1) * 12)) & 0xFFF;
+		const uint32_t ks = g.bp[BP_TEV_KSEL + (st >> 1)];
+		const uint32_t ksel = (st & 1) ? ((ks >> 14) & 0x3FF) : ((ks >> 4) & 0x3FF);
+		fprintf(f, "  stage %lu: order %03lx color %06lx alpha %06lx kc %02lx ka %02lx\n", (unsigned long)st,
+		        (unsigned long)ord, (unsigned long)(g.bp[BP_TEV_COLOR_ENV + 2 * st] & 0xFFFFFF),
+		        (unsigned long)(g.bp[BP_TEV_COLOR_ENV + 2 * st + 1] & 0xFFFFFF), (unsigned long)(ksel & 31),
+		        (unsigned long)(ksel >> 5));
+	}
+	fprintf(f, " regs");
+	for (int i = 0; i < 8; i++)
+		fprintf(f, " %06lx", (unsigned long)(g.bp[BP_TEV_REG + i] & 0xFFFFFF));
+	fprintf(f, "\n konst");
+	for (int i = 0; i < 8; i++)
+		fprintf(f, " %06lx", (unsigned long)(g.kreg[i] & 0xFFFFFF));
+	fprintf(f, "\n swap");
+	for (int i = 0; i < 8; i++)
+		fprintf(f, " %06lx", (unsigned long)(g.bp[BP_TEV_KSEL + i] & 0xFFFFFF));
+	fprintf(f, "\n");
+	for (int u = 0; u < plan.units; u++) {
+		const int m = plan.map[u];
+		const uint32_t img0 = g.bp[bpTexReg(BP_TX_IMAGE0, m)];
+		const void* p = g.texImage[m];
+		fprintf(f, "  unit %d: map %d coord %d %lux%lu fmt %lu mode0 %06lx at %p%s\n", u, m, plan.coord[u],
+		        (unsigned long)((img0 & 0x3FF) + 1), (unsigned long)(((img0 >> 10) & 0x3FF) + 1),
+		        (unsigned long)((img0 >> 20) & 15), (unsigned long)g.bp[bpTexReg(BP_TX_MODE0, m)], p,
+		        copyTexture(p) ? " (EFB copy)" : "");
+	}
+}
+
 // The BP state applyState and setupTev read. Consecutive batches often differ only in XF (matrices),
 // so when this snapshot matches the previous batch's, the combiners, blending, depth and alpha test
 // set up for it still hold and are not rebuilt.
@@ -275,6 +533,21 @@ uint8_t* batchRoom(uint32_t n, uint32_t stride)
 
 }  // namespace
 
+C3D_Tex* copyTexture(const void* ptr)
+{
+	if (!ptr || s_copies.empty())
+		return nullptr;
+	auto it = s_copies.find(ptr);
+	if (it == s_copies.end())
+		return nullptr;
+	if (!unwrittenSince(ptr, it->second.bytes, it->second.clock)) {  // the CPU wrote there since
+		s_retired.push_back(it->second);
+		s_copies.erase(it);
+		return nullptr;
+	}
+	return &it->second.tex;
+}
+
 }  // namespace gx3ds
 
 namespace gx {
@@ -297,6 +570,7 @@ void rendererInit(float)
 	vtxInit(&s_gxProg);
 	s_vertRing = (uint8_t*)linearAlloc(kVertRing);
 	s_idxRing = (uint8_t*)linearAlloc(kIdxRing);
+	s_efbTexOk = C3D_TexInitVRAM(&s_efbTex, 256, 512, GPU_RGBA8);
 	s_ready = s_target && s_vertRing && s_idxRing;
 	fprintf(stderr, "[gx3ds] citro3d %s: 400x240 RGBA8 target, %u KiB vertex ring, linear free %lu KiB, vram free %lu KiB\n",
 	        s_ready ? "ready" : "FAILED", (unsigned)(kVertRing >> 10), (unsigned long)(linearSpaceFree() >> 10),
@@ -456,14 +730,22 @@ void flushBatch()
 	const TevPlan& plan = s_lastPlan;
 	const u64 tx0 = svcGetSystemTick();
 	const bool ok = vtxSetup(plan, s_fmt, s_stride, s_batch);
+	const uint32_t why = plan.why | g_vtxWhy;
+	if (why)
+		sms3ds_gx_tev_approx = sms3ds_gx_tev_approx + 1;
+	s_frameWhy |= why;
+	if (s_dump)
+		dumpBatch(plan, why);
 	const u64 tx1 = svcGetSystemTick();
 	for (int u = 0; u < plan.units; u++)
 		C3D_TexBind(u, textureForMap(plan.map[u]));
 	const u64 tx2 = svcGetSystemTick();
 	s_tXform += tx1 - tx0;
 	s_tTex += tx2 - tx1;
-	if (ok)
+	if (ok) {
 		C3D_DrawElements(GPU_TRIANGLES, (int)s_idx.size(), C3D_UNSIGNED_SHORT, oi);
+		s_efbDirty = true;
+	}
 	else
 		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
 	s_frameBatches++;
@@ -503,16 +785,33 @@ void executeCopy(uint32_t ctrl)
 		s_tFlush = s_tXform = s_tTex = s_tWait = 0;
 		sms3ds_gx_batches_per_frame = s_frameBatches;
 		sms3ds_gx_vertices_per_frame = s_frameVerts;
-		s_frameBatches = s_frameVerts = 0;
+		sms3ds_gx_approx_why = s_frameWhy;
+		s_frameBatches = s_frameVerts = s_frameWhy = 0;
+		if (s_dump) {
+			fclose(s_dump);
+			s_dump = nullptr;
+			fprintf(stderr, "[gx3ds] frame dump: %lu batches, %lu distinct, in frame-dump.txt\n",
+			        (unsigned long)s_dumpBatches, (unsigned long)s_dumpSeen.size());
+		} else if (sms3ds_gx_dump_request) {
+			sms3ds_gx_dump_request = 0;
+			s_dump = fopen("sdmc:/3ds/sms-3ds/frame-dump.txt", "w");
+			s_dumpSeen.clear();
+			s_dumpBatches = 0;
+			if (s_dump)
+				fprintf(s_dump, "sms-3ds frame dump (display frame %lu)\n", (unsigned long)g_displayFrames);
+		}
 		if (clear) {
 			readClearValues();
 			s_clearPending = true;
 		}
 	} else {
-		sms3ds_gx_copies = sms3ds_gx_copies + 1;  // texture copies: Phase 2d
-		if (clear && s_inFrame) {
+		sms3ds_gx_copies = sms3ds_gx_copies + 1;
+		beginFrame();
+		copyToTexture(ctrl);
+		if (clear) {
 			readClearValues();
 			C3D_RenderTargetClear(s_target, C3D_CLEAR_ALL, s_clearColor, s_clearDepth);
+			s_efbDirty = true;
 		}
 	}
 }

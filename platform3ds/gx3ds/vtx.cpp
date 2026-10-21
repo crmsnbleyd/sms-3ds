@@ -171,6 +171,8 @@ void vtxInit(shaderProgram_s* prog)
 	vtxInvalidate();
 }
 
+uint32_t g_vtxWhy;
+
 void vtxInvalidate() { memset(s_shadowValid, 0, sizeof s_shadowValid); }
 
 bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* base)
@@ -251,7 +253,7 @@ bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* ba
 
 	setXf();
 	setFinal();
-	approx |= setLighting();
+	const bool lightApprox = setLighting();
 
 	// attribute loaders in buffer order, with padding entries over the skipped bytes
 	struct L {
@@ -306,8 +308,7 @@ bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* ba
 	C3D_BufInfo* bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
 	BufInfo_Add(bi, base, stride, entries, perm);
-	if (approx)
-		sms3ds_gx_tev_approx = sms3ds_gx_tev_approx + 1;
+	g_vtxWhy = (approx ? AX_TEXGEN : 0) | (lightApprox ? AX_LIGHT : 0);
 	return true;
 }
 
