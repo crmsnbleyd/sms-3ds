@@ -633,13 +633,23 @@ void dumpBatch(const TevPlan& plan, uint32_t why)
 // The BP state applyState and setupTev read. Consecutive batches often differ only in XF (matrices),
 // so when this snapshot matches the previous batch's, the combiners, blending, depth and alpha test
 // set up for it still hold and are not rebuilt.
-constexpr int kPixelWords = 7 + 32 + 8 + 8 + 8 + 8 + 4;  // must match snapshotPixel
+constexpr int kPixelWords = 7 + 32 + 8 + 8 + 8 + 8 + 4 + 1;  // must match snapshotPixel
 struct PixelState {
 	uint32_t w[kPixelWords];
 	bool operator==(const PixelState& o) const { return memcmp(w, o.w, sizeof w) == 0; }
 };
 PixelState s_lastPixel;
 TevPlan s_lastPlan;
+
+// GX maps (bit per map) whose current texture is an EFB copy.
+uint32_t copyMaps()
+{
+	uint32_t m = 0;
+	for (int i = 0; i < 8; i++)
+		if (g.texImage[i] && copyTexture(g.texImage[i]))
+			m |= 1u << i;
+	return m;
+}
 
 void snapshotPixel(PixelState& p)
 {
@@ -665,6 +675,7 @@ void snapshotPixel(PixelState& p)
 	p.w[n++] = g.xfReg[XFR_COLOR0CTRL + 1];
 	p.w[n++] = g.xfReg[XFR_ALPHA0CTRL + 1];
 	p.w[n++] = g.xfReg[XFR_MAT0 + 1];
+	p.w[n++] = copyMaps();  // EFB-copy textures take compares by arithmetic, not baking
 	if (n != kPixelWords)
 		svcBreak(USERBREAK_PANIC);
 }
@@ -884,7 +895,7 @@ void flushBatch()
 	snapshotPixel(ps);
 	if (!s_lastPixelValid || !(ps == s_lastPixel)) {
 		applyState();
-		setupTev(s_lastPlan);
+		setupTev(s_lastPlan, ps.w[kPixelWords - 1]);
 		s_lastPixel = ps;
 		s_lastPixelValid = true;
 	}

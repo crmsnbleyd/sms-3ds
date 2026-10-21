@@ -112,6 +112,7 @@ struct StageCtx {
 	uint32_t why;
 	TexCmp* cmp;   // the compare baked into this stage's texture unit (null without a texture)
 	bool cmpTrue;  // this stage's compare texture was left out for want of units: taken as true
+	bool texIsCopy;  // this stage's texture is an EFB copy (a compare cannot be baked into it)
 };
 
 In konst(uint32_t sel, bool alpha)
@@ -227,16 +228,17 @@ struct Op {
 	int n;  // operands used
 	In arg[3];
 	bool inv[3];  // one minus
+	GPU_TEVSCALE scale;
 };
 struct Prog {
 	int nops;
-	Op op[2];
-	GPU_TEVSCALE scale;
+	Op op[6];
+	GPU_TEVSCALE scale;  // of the last operation (GX's stage scale)
 };
 
 Op mkOp(GPU_COMBINEFUNC f, int n, const In& a, const In& b, const In& c)
 {
-	return Op{f, n, {a, b, c}, {false, false, false}};
+	return Op{f, n, {a, b, c}, {false, false, false}, GPU_TEVSCALE_1};
 }
 Op op1(GPU_COMBINEFUNC f, const In& a) { return mkOp(f, 1, a, a, a); }
 Op op2(GPU_COMBINEFUNC f, const In& a, const In& b) { return mkOp(f, 2, a, b, b); }
@@ -321,8 +323,36 @@ Prog compileChan(StageCtx& c, uint32_t env, bool alpha, int maxOps)
 		TexCmp m{true, op, (int8_t)(t ? t->sel : -1), t == &b, {0, 0, 0, 0}};
 		if (k)
 			memcpy(m.ref, k->rgba, 4);
-		const bool fits = t && c.cmp && (!alpha || op >= 6) && (!c.cmp->on || *c.cmp == m);
+		const bool fits = t && c.cmp && !c.texIsCopy && (!alpha || op >= 6) && (!c.cmp->on || *c.cmp == m);
 		if (!fits) {
+			// "greater than" by saturating arithmetic: (a - b) * 4^4 is >= 1 wherever a > b on 8-bit
+			// values (the GR16 / BGR24 forms compare their most significant byte only)
+			const int extra = (isZero(cc, alpha) ? 0 : isOne(cc, alpha) ? 0 : 1) + (isZero(d, alpha) ? 0 : 1);
+			if (!(op & 1) && (!alpha || op >= 6) && maxOps >= 4 + extra && !isZero(cc, alpha)) {
+				const int comp = alpha ? 3 : op == 0 ? 0 : op == 2 ? 1 : op == 4 ? 2 : -1;
+				auto pick = [&](In i) {
+					if (comp < 0)
+						return i;
+					if (i.kind == K_SRC && i.sel < 0)
+						i.sel = comp;
+					else if (i.kind == K_CONST)
+						memset(i.rgba, i.rgba[comp], 4);
+					return i;
+				};
+				Op o = op2(GPU_SUBTRACT, pick(a), pick(b));
+				o.scale = GPU_TEVSCALE_4;
+				p.op[p.nops++] = o;
+				for (int i = 0; i < 3; i++) {
+					Op r = op1(GPU_REPLACE, temp());
+					r.scale = GPU_TEVSCALE_4;
+					p.op[p.nops++] = r;
+				}
+				if (!isOne(cc, alpha))
+					p.op[p.nops++] = op2(GPU_MODULATE, temp(), cc);
+				if (!isZero(d, alpha))
+					p.op[p.nops++] = op2(GPU_ADD, d, temp());
+				return p;
+			}
 			c.why |= AX_COMPARE;
 			p.op[p.nops++] = op1(GPU_REPLACE, d);
 			return p;
@@ -405,7 +435,7 @@ Prog compileChan(StageCtx& c, uint32_t env, bool alpha, int maxOps)
 	if (!ok)
 		c.why |= sub ? AX_SUB : !dz ? AX_LERP_D : bias == 1 ? AX_BIAS_HALF : AX_SIGNED;
 	if (scale == 3) {  // x 0.5: one more stage multiplying by 128/255
-		if (p.nops < maxOps && p.nops < 2)
+		if (p.nops < maxOps)
 			p.op[p.nops++] = op2(GPU_MODULATE, temp(), cst(128));
 		else
 			c.why |= AX_SCALE_HALF;
@@ -563,7 +593,7 @@ bool copyLoc(const Prog& p, bool alpha, const Loc* col, const Loc* alp, Loc& out
 
 }  // namespace
 
-void setupTev(TevPlan& plan)
+void setupTev(TevPlan& plan, uint32_t copyMaps)
 {
 	const uint32_t gen = g.bp[BP_GENMODE];
 	const uint32_t nst = ((gen >> 10) & 15) + 1;
@@ -641,9 +671,11 @@ void setupTev(TevPlan& plan)
 		};
 		const uint32_t ord = (g.bp[BP_TREF + (s >> 1)] >> ((s & 1) * 12)) & 0x3FF;
 		StageCtx c{col, alp, stageUnit[s], (int)((ord >> 7) & 7), swapTable(rswap), swapTable(tswap), ksel & 31,
-		           ksel >> 5, 0, stageUnit[s] >= 0 ? &plan.cmp[stageUnit[s]] : nullptr, stageCmpTrue[s]};
+		           ksel >> 5, 0, stageUnit[s] >= 0 ? &plan.cmp[stageUnit[s]] : nullptr, stageCmpTrue[s],
+		           stageUnit[s] >= 0 && ((copyMaps >> plan.map[stageUnit[s]]) & 1)};
 		// two PICA stages for this GX stage only while every later GX stage keeps at least one
-		const int maxOps = 6 - e.n - (ngx - s - 1) >= 2 ? 2 : 1;
+		const int room = 6 - e.n - (ngx - s - 1);
+		const int maxOps = room >= 1 ? room : 1;
 		Prog pc = compileChan(c, cenv, false, maxOps);
 		Prog pa = compileChan(c, aenv, true, maxOps);
 		approx |= c.why;
@@ -663,12 +695,15 @@ void setupTev(TevPlan& plan)
 		for (int i = 0; i < k; i++) {
 			const int ps = e.n + i;
 			// a channel with fewer operations does them first and passes its result on
+			auto opScale = [](const Prog& p, int i) {
+				return i == p.nops - 1 && p.scale != GPU_TEVSCALE_1 ? p.scale : p.op[i].scale;
+			};
 			if (i < pc.nops)
-				emitOp(e, col, alp, ps, 0, pc.op[i], i == pc.nops - 1 ? pc.scale : GPU_TEVSCALE_1);
+				emitOp(e, col, alp, ps, 0, pc.op[i], opScale(pc, i));
 			else
 				passThrough(e.st[ps], 0);
 			if (i < pa.nops)
-				emitOp(e, col, alp, ps, 1, pa.op[i], i == pa.nops - 1 ? pa.scale : GPU_TEVSCALE_1);
+				emitOp(e, col, alp, ps, 1, pa.op[i], opScale(pa, i));
 			else
 				passThrough(e.st[ps], 1);
 		}

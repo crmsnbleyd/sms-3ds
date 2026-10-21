@@ -63,7 +63,7 @@ struct TevPlan {
 	TexCmp cmp[3];   // per unit: a compare baked into the texture
 	uint32_t why;    // AX_* approximations made
 };
-void setupTev(TevPlan& plan);
+void setupTev(TevPlan& plan, uint32_t copyMaps);  // copyMaps: GX maps whose texture is an EFB copy
 
 // vtx.cpp: the GPU vertex pipeline (gx.v.pica). vtxSetup points the PICA at a batch of packed GX
 // vertices of format `fmt` (gx_fifo.cpp's vtxFmtLayout) at `base` in linear memory and sets the
