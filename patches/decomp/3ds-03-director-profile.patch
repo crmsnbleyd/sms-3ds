@@ -1,0 +1,75 @@
+--- a/src/System/MarDirectorDirect.cpp
++++ b/src/System/MarDirectorDirect.cpp
+@@ -21,6 +21,17 @@
+ #include <GC2D/ConsoleStr.hpp>
+ #include <GC2D/ScrnFader.hpp>
+ #include <GC2D/PauseMenu2.hpp>
++
++#ifdef __3DS__
++// platform3ds: time spent in the director's phases, shown on the HUD
++extern "C" void sms3ds_prof_begin(int bucket);
++extern "C" void sms3ds_prof_end(int bucket);
++#define SMS3DS_PROF_BEGIN(b) sms3ds_prof_begin(b)
++#define SMS3DS_PROF_END(b) sms3ds_prof_end(b)
++#else
++#define SMS3DS_PROF_BEGIN(b)
++#define SMS3DS_PROF_END(b)
++#endif
+ #include <GC2D/CardSave.hpp>
+ #include <GC2D/Guide.hpp>
+ #include <GC2D/SunGlass.hpp>
+@@ -199,25 +210,30 @@
+ 			if ((unk58 & 1) || (unk58 & 2))
+ 				bVar1 = false;
+ 
++			SMS3DS_PROF_BEGIN(0);
+ 			if (bVar1)
+ 				gpObjHitCheck->checkActorsHit();
+ 			else
+ 				gpObjHitCheck->clearHitNum();
++			SMS3DS_PROF_END(0);
+ 
+ 			u32 movementCue = ~blacklistedCues;
+ 			if (unk58 & 1)
+ 				movementCue &= ~CUE_MOVEMENT_GATE_A;
+ 			if (unk58 & 2)
+ 				movementCue &= ~CUE_MOVEMENT_GATE_B;
++			SMS3DS_PROF_BEGIN(1);
+ 			if (checkDemoFlag(DEMO_FLAG_SHINE_GET_STOP_THE_WORLD))
+ 				mShinePfLstMov->perform(movementCue, &local_140);
+ 			else
+ 				mPerformListMovement->perform(movementCue, &local_140);
++			SMS3DS_PROF_END(1);
+ 
+ 			u32 someCue = 0;
+ 			if (!checkFlag(DIRECTOR_FLAG_LAST_SIMULATION_TICK))
+ 				someCue |= CUE_CALC_ANIM;
+ 			u32 unk30Cue = ~someCue;
++			SMS3DS_PROF_BEGIN(2);
+ 			unk30->perform(unk30Cue, &local_140);
+ 			movement();
+ #ifdef TARGET_PC
+@@ -230,6 +246,7 @@
+ 				else
+ 					mPerformListCalcAnim->perform(~blacklistedCues, &local_140);
+ 			}
++			SMS3DS_PROF_END(2);
+ 
+ 			if (checkFlag(DIRECTOR_FLAG_LAST_SIMULATION_TICK)) {
+ 				local_140.unk0 = 0;
+@@ -238,6 +255,7 @@
+ 			}
+ 		} else {
+ 			local_140.unk0 = 0;
++			SMS3DS_PROF_BEGIN(3);
+ 			unk40->perform(CUE_ALL, &local_140);
+ 			unk38->perform(CUE_ALL, &local_140);
+ 			unk3C->perform(CUE_ALL, &local_140);
+@@ -260,6 +278,7 @@
+ 		mPerformListGXPost->perform(CUE_ALL, &local_140);
+ #endif
+ 			GXInvalidateTexAll();
++			SMS3DS_PROF_END(3);
+ 		}
+ 		desiredAppState = ({ typedef __typeof__(changeState()) sms_mod_r_; void* sms_mod_t_ = SMS_MOD_SITE(0x80299D0C); sms_mod_t_ ? ((__typeof__(sms_mod_as_free(static_cast<sms_mod_r_ (TMarDirector::*)()>(&TMarDirector::changeState))))sms_mod_t_)(this) : changeState(); });
+ 		offFlag(DIRECTOR_FLAG_LAST_SIMULATION_TICK

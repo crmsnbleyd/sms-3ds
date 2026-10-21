@@ -38,6 +38,12 @@ volatile float sms3ds_gx_cpu_ms, sms3ds_gx_gpu_ms;
 volatile uint32_t sms3ds_gx_tev_approx, sms3ds_gx_approx_why, sms3ds_gx_dump_request;
 volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xform_ms, sms3ds_prof_tex_ms,
     sms3ds_prof_wait_ms, sms3ds_prof_decode_ms;
+volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
+namespace {
+u64 s_phaseStart[SMS3DS_PROF_PHASES], s_phaseTicks[SMS3DS_PROF_PHASES];
+}
+extern "C" void sms3ds_prof_begin(int phase) { s_phaseStart[phase] = svcGetSystemTick(); }
+extern "C" void sms3ds_prof_end(int phase) { s_phaseTicks[phase] += svcGetSystemTick() - s_phaseStart[phase]; }
 
 namespace gx3ds {
 namespace {
@@ -1147,10 +1153,13 @@ void executeCopy(uint32_t ctrl)
 			sms3ds_prof_tex_ms = ticksMs(s_tTex);
 			sms3ds_prof_wait_ms = ticksMs(s_tWait);
 			sms3ds_prof_decode_ms = (float)((g_decodeSeconds - s_decodeAtPresent) * 1000.0);
+			for (int i = 0; i < SMS3DS_PROF_PHASES; i++)
+				sms3ds_prof_phase_ms[i] = ticksMs(s_phaseTicks[i]);
 		}
 		s_lastPresent = now;
 		s_decodeAtPresent = g_decodeSeconds;
 		s_tFlush = s_tXform = s_tTex = s_tWait = 0;
+		memset(s_phaseTicks, 0, sizeof s_phaseTicks);
 		sms3ds_gx_batches_per_frame = s_frameBatches;
 		sms3ds_gx_vertices_per_frame = s_frameVerts;
 		sms3ds_gx_approx_why = s_frameWhy;

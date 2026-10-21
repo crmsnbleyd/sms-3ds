@@ -72,6 +72,9 @@ void drawBottom()
 	put("\x1b[11;1Happ mem free %6lu KiB  ", (unsigned long)(osGetMemRegionFree(MEMREGION_APPLICATION) >> 10));
 	put("\x1b[12;1Hheap %lu KiB, linear %lu KiB", (unsigned long)(envGetHeapSize() >> 10),
 	    (unsigned long)(envGetLinearHeapSize() >> 10));
+	put("\x1b[16;1Hhit%3.0f move%3.0f anim%3.0f draw%3.0f mix%3.0f ", (double)sms3ds_prof_phase_ms[0],
+	    (double)sms3ds_prof_phase_ms[1], (double)sms3ds_prof_phase_ms[2], (double)sms3ds_prof_phase_ms[3],
+	    (double)sms3ds_prof_phase_ms[4]);
 	put("\x1b[15;1Hstate %d area %d ep %d file %d  pad %04x   ", sms3ds_state, sms3ds_area, sms3ds_episode,
 	    sms3ds_save_file, (unsigned)sms3ds_pad_buttons);
 	put("\x1b[17;1H\x1b[7m log  (START+SELECT quit, L+R+X dump)    \x1b[0m");

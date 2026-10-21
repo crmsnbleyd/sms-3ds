@@ -1,0 +1,25 @@
+--- a/platform/audio/dsp_hle.cpp
++++ b/platform/audio/dsp_hle.cpp
+@@ -88,11 +88,22 @@
+ 	}
+ }
+ 
++#ifdef __3DS__
++extern "C" void sms3ds_prof_begin(int bucket);  // platform3ds: audio mixing time on the HUD
++extern "C" void sms3ds_prof_end(int bucket);
++#endif
++
+ void render_subframe()
+ {
+ 	maybe_dump_aram();
+ 	u32 n = g.subSamples;
++#ifdef __3DS__
++	sms3ds_prof_begin(4);
++#endif
+ 	port_dspmix_render(g.outA + g.sub * n, g.outB + g.sub * n, (int)n, g.master);
++#ifdef __3DS__
++	sms3ds_prof_end(4);
++#endif
+ 	g.sub++;
+ 	g.subframesRendered++;
+ 	reply(0xFF00);

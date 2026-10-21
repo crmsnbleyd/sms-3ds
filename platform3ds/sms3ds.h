@@ -60,6 +60,14 @@ extern volatile uint32_t sms3ds_gx_dump_request; // set by the HUD (L+R+X): dump
 // for the GPU at frame start, and the GX front end's vertex decoding. The rest is game logic.
 extern volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xform_ms, sms3ds_prof_tex_ms,
     sms3ds_prof_wait_ms, sms3ds_prof_decode_ms;
+// Phases timed by sms3ds_prof_begin/end (patches 3ds-03-director-profile, 3ds-07-dsp-profile), ms in
+// the last frame: actor hit checks, movement, animation (incl. TMarDirector::movement), drawing (the
+// game's draw lists, which includes GX decoding and the backend's flushes), audio mixing (DSP HLE).
+// A phase includes any other game thread that ran inside it.
+enum { SMS3DS_PROF_HIT, SMS3DS_PROF_MOVE, SMS3DS_PROF_ANIM, SMS3DS_PROF_DRAW, SMS3DS_PROF_MIX, SMS3DS_PROF_PHASES };
+extern volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
+void sms3ds_prof_begin(int phase);
+void sms3ds_prof_end(int phase);
 
 #ifdef __cplusplus
 }
