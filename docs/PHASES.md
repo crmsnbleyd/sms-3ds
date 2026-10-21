@@ -22,9 +22,18 @@
 - MEM1 is a 24 MiB heap block (3DS user space ends below 0x40000000), so the GX memory window is set to it and two
   decomp spots that assumed 0x80000000 are patched (`patches/decomp/3ds-01-mem1-anywhere.patch`).
 
+## Phase 1 run log
+
+1. Azahar refused the .3dsx: a relocation outside the image (`&jdsp + 0x80000000`). Fixed (patches/decomp/3ds-02);
+   `scripts/check-3dsx.py` now runs after every build.
+2. Booted to `SMS_main`, heaps, DSP HLE, memory card; 75 frames, then the GX parser lost sync and read far past its
+   buffers (~920k unmapped reads; Azahar ran at 7%). Cause: ARM short enums. Fixed by building with `-fno-short-enums`.
+   Also seen: `/AudioRes/Seqs/JaiArcS.hed` not found, followed by null reads in MSound/JAIBasic (check after the fix).
+
 ## Phase 1 open risks (checked on the first runs)
 
-- FPSCR: Horizon may run threads with flush-to-zero / default-NaN (logged at boot as `[3ds] FPSCR`).
+- FPSCR: **confirmed** — Horizon starts threads with FPSCR `0x03000000` (flush-to-zero and default-NaN on), unlike the
+  Gekko. Not yet changed; revisit if float results differ (denormals become 0).
 - Misaligned VFP loads from file data would raise data aborts on the ARM11.
 - pthread behaviour on libctru: priorities, `pthread_cond_timedwait`, detached threads.
 - Memory: MEM1 24 MiB + ARAM 16 MiB + ~6 MiB image + thread stacks need New 3DS application memory.
