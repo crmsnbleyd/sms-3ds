@@ -155,8 +155,11 @@ void applyState()
 	} else {
 		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 	}
-	// Phase 2a: no culling until the winding through the tilted framebuffer is checked on screen.
-	C3D_CullFace(GPU_CULL_NONE);
+	// GX front faces are clockwise on screen (sms-pc-port gx_render.cpp); the EFB-to-framebuffer
+	// mapping reverses orientation as GL's y flip does, so front faces are counter-clockwise here.
+	// GX cull 1 culls back faces, 2 front faces, 3 everything (flushBatch skips the draw).
+	const uint32_t cull = (g.bp[BP_GENMODE] >> 14) & 3;
+	C3D_CullFace(cull == 1 ? GPU_CULL_BACK_CCW : cull == 2 ? GPU_CULL_FRONT_CCW : GPU_CULL_NONE);
 	// The picture is 4:3 in the middle of the 400-pixel width: keep draws out of the side bars.
 	// Framebuffer coordinates are rotated (x along the screen's height, y along its width).
 	C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, kLetterbox, kScreenH, kScreenW - kLetterbox);
@@ -825,7 +828,7 @@ void flushBatch()
 	const u64 tx2 = svcGetSystemTick();
 	s_tXform += tx1 - tx0;
 	s_tTex += tx2 - tx1;
-	if (ok) {
+	if (ok && ((g.bp[BP_GENMODE] >> 14) & 3) != 3) {
 		C3D_DrawElements(GPU_TRIANGLES, (int)s_idx.size(), C3D_UNSIGNED_SHORT, oi);
 		s_efbDirty = true;
 	}

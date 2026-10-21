@@ -77,12 +77,17 @@ bool isOne(const In& i, bool alpha)
 	return i.kind == K_CONST && (alpha ? i.rgba[3] == 255 : (i.rgba[0] & i.rgba[1] & i.rgba[2]) == 255);
 }
 
-// Where a GX register's colour or alpha is: known (a constant) or the output of a PICA stage.
+// Where a GX register's colour or alpha is: known (a constant), a source read again where it is used
+// (a texture or the rasterised colour, when the stage that wrote it only copied it), or the output of
+// a PICA stage.
 struct Loc {
 	bool known;
 	uint8_t rgba[4];
 	int stage;
+	bool isSrc;
+	In in;  // isSrc: the source as an operand (alpha locations: its alpha component)
 };
+Loc atStage(int s) { return Loc{false, {0, 0, 0, 0}, s, false, In{}}; }
 
 // GX register `reg` (its alpha with alphaOf) as an operand of a colour (alpha = false) or alpha input.
 In regIn(const Loc* col, const Loc* alp, int reg, bool alphaOf, bool alpha)
@@ -91,6 +96,8 @@ In regIn(const Loc* col, const Loc* alp, int reg, bool alphaOf, bool alpha)
 	const Loc& L = a ? alp[reg] : col[reg];
 	if (L.known)
 		return cstRgba(L.rgba, alphaOf && !alpha);
+	if (L.isSrc)
+		return L.in;
 	return In{K_REG, GPU_PREVIOUS, -1, {0, 0, 0, 0}, reg, a};
 }
 
@@ -103,7 +110,8 @@ struct StageCtx {
 	uint32_t swapRas, swapTex;  // swap tables (2 bits per component: r g b a)
 	uint32_t kcsel, kasel;
 	uint32_t why;
-	TexCmp* cmp;  // the compare baked into this stage's texture unit (null without a texture)
+	TexCmp* cmp;   // the compare baked into this stage's texture unit (null without a texture)
+	bool cmpTrue;  // this stage's compare texture was left out for want of units: taken as true
 };
 
 In konst(uint32_t sel, bool alpha)
@@ -302,6 +310,14 @@ Prog compileChan(StageCtx& c, uint32_t env, bool alpha, int maxOps)
 			t = &a, k = &b;
 		else if (isTex(b) && a.kind == K_CONST)
 			t = &b, k = &a;
+		if (c.cmpTrue) {  // d + c
+			c.why |= AX_COMPARE;
+			if (isZero(cc, alpha))
+				p.op[p.nops++] = op1(GPU_REPLACE, d);
+			else
+				combineD(p, d, cc, isZero(d, alpha), false, 0, maxOps);
+			return p;
+		}
 		TexCmp m{true, op, (int8_t)(t ? t->sel : -1), t == &b, {0, 0, 0, 0}};
 		if (k)
 			memcpy(m.ref, k->rgba, 4);
@@ -373,6 +389,12 @@ Prog compileChan(StageCtx& c, uint32_t env, bool alpha, int maxOps)
 		if (vk == V_PRODUCT) {
 			o = op2(GPU_MODULATE, x, y);
 			o.inv[1] = yInv;
+		} else if (isOne(a, alpha) && cc.kind == K_CONST) {
+			o = mkOp(GPU_MULTIPLY_ADD, 3, b, cc, cc);  // b c + (1 - c): one constant
+			o.inv[2] = true;
+		} else if (isOne(b, alpha) && cc.kind == K_CONST) {
+			o = mkOp(GPU_MULTIPLY_ADD, 3, a, cc, cc);  // a (1 - c) + c
+			o.inv[1] = true;
 		} else {
 			o = mkOp(GPU_INTERPOLATE, 3, b, a, cc);  // b c + a (1 - c)
 		}
@@ -511,6 +533,34 @@ void passThrough(PStage& st, int g)
 	}
 }
 
+// When a channel's program only copies a source, a constant or a register, the location it leaves
+// in its destination register (no PICA stage needed); false otherwise.
+bool copyLoc(const Prog& p, bool alpha, const Loc* col, const Loc* alp, Loc& out)
+{
+	if (p.nops != 1 || p.op[0].func != GPU_REPLACE || p.op[0].inv[0] || p.scale != GPU_TEVSCALE_1)
+		return false;
+	const In& in = p.op[0].arg[0];
+	switch (in.kind) {
+	case K_CONST:
+		out = Loc{true, {in.rgba[0], in.rgba[1], in.rgba[2], in.rgba[3]}, -1, false, In{}};
+		if (alpha)
+			memset(out.rgba, in.rgba[3], 3);
+		return true;
+	case K_SRC:
+		out = Loc{false, {0, 0, 0, 0}, -1, true, in};
+		if (alpha && out.in.sel < 0)
+			out.in.sel = 3;
+		return true;
+	case K_REG:
+		if (!alpha && in.alphaOf)
+			return false;  // colour = a register's alpha broadcast: not a location
+		out = in.alphaOf ? alp[in.reg] : col[in.reg];
+		return true;
+	default:
+		return false;
+	}
+}
+
 }  // namespace
 
 void setupTev(TevPlan& plan)
@@ -522,39 +572,58 @@ void setupTev(TevPlan& plan)
 
 	// texture units: distinct (map, coord) pairs in order of use; a compare stage's texture gets its
 	// own unit (its texels become the comparison's result)
-	plan.units = 0;
-	int stageUnit[16];
-	bool unitCmp[3] = {false, false, false};
-	for (int u = 0; u < 3; u++)
-		plan.cmp[u].on = false;
+	// With more than three, compare textures go first: SMS's characters compare a dirt mask to pick
+	// their body texture or the goop texture, and without it they are drawn clean (compare true).
+	struct Pair {
+		int map, coord;
+		bool cmp;
+	} pairs[16];
+	int npairs = 0, stagePair[16];
 	for (uint32_t s = 0; s < nst; s++) {
 		const uint32_t ord = (g.bp[BP_TREF + (s >> 1)] >> ((s & 1) * 12)) & 0x3FF;
-		stageUnit[s] = -1;
+		stagePair[s] = -1;
 		if (!((ord >> 6) & 1))
 			continue;
 		const int map = ord & 7, coord = (ord >> 3) & 7;
-		const bool cmpStage = s < 16 && ((((g.bp[BP_TEV_COLOR_ENV + 2 * s] >> 16) & 3) == 3) ||
-		                                 (((g.bp[BP_TEV_COLOR_ENV + 2 * s + 1] >> 16) & 3) == 3));
-		int u = -1;
-		for (int i = 0; i < plan.units; i++)
-			if (plan.map[i] == map && plan.coord[i] == coord && unitCmp[i] == cmpStage)
-				u = i;
-		if (u < 0 && plan.units < 3) {
-			u = plan.units++;
-			plan.map[u] = map;
-			plan.coord[u] = coord;
-			unitCmp[u] = cmpStage;
-		}
-		if (u < 0)
+		const bool cmpStage = (((g.bp[BP_TEV_COLOR_ENV + 2 * s] >> 16) & 3) == 3) ||
+		                      (((g.bp[BP_TEV_COLOR_ENV + 2 * s + 1] >> 16) & 3) == 3);
+		int i = 0;
+		while (i < npairs && !(pairs[i].map == map && pairs[i].coord == coord && pairs[i].cmp == cmpStage))
+			i++;
+		if (i == npairs)
+			pairs[npairs++] = Pair{map, coord, cmpStage};
+		stagePair[s] = i;
+	}
+	const bool dropCmp = npairs > 3;
+	int pairUnit[16];
+	plan.units = 0;
+	for (int u = 0; u < 3; u++)
+		plan.cmp[u].on = false;
+	for (int i = 0; i < npairs; i++) {
+		pairUnit[i] = -1;
+		if (dropCmp && pairs[i].cmp)
+			continue;
+		if (plan.units < 3) {
+			pairUnit[i] = plan.units;
+			plan.map[plan.units] = pairs[i].map;
+			plan.coord[plan.units] = pairs[i].coord;
+			plan.units++;
+		} else {
 			approx |= AX_UNITS;
-		stageUnit[s] = u;
+		}
+	}
+	int stageUnit[16];
+	bool stageCmpTrue[16];
+	for (uint32_t s = 0; s < nst; s++) {
+		stageUnit[s] = stagePair[s] < 0 ? -1 : pairUnit[stagePair[s]];
+		stageCmpTrue[s] = stagePair[s] >= 0 && dropCmp && pairs[stagePair[s]].cmp;
 	}
 
 	Loc col[4], alp[4];
 	for (int i = 0; i < 4; i++) {
 		uint8_t v[4];
 		tevReg(i, v);
-		col[i] = Loc{true, {v[0], v[1], v[2], v[3]}, -1};
+		col[i] = Loc{true, {v[0], v[1], v[2], v[3]}, -1, false, In{}};
 		alp[i] = col[i];
 	}
 
@@ -572,12 +641,20 @@ void setupTev(TevPlan& plan)
 		};
 		const uint32_t ord = (g.bp[BP_TREF + (s >> 1)] >> ((s & 1) * 12)) & 0x3FF;
 		StageCtx c{col, alp, stageUnit[s], (int)((ord >> 7) & 7), swapTable(rswap), swapTable(tswap), ksel & 31,
-		           ksel >> 5, 0, stageUnit[s] >= 0 ? &plan.cmp[stageUnit[s]] : nullptr};
+		           ksel >> 5, 0, stageUnit[s] >= 0 ? &plan.cmp[stageUnit[s]] : nullptr, stageCmpTrue[s]};
 		// two PICA stages for this GX stage only while every later GX stage keeps at least one
 		const int maxOps = 6 - e.n - (ngx - s - 1) >= 2 ? 2 : 1;
 		Prog pc = compileChan(c, cenv, false, maxOps);
 		Prog pa = compileChan(c, aenv, true, maxOps);
 		approx |= c.why;
+		const uint32_t cdst = (cenv >> 22) & 3, adst = (aenv >> 22) & 3;
+		// a stage that only copies a source or constant takes no PICA stage: its readers use that
+		Loc nc, na;
+		if (copyLoc(pc, false, col, alp, nc) && copyLoc(pa, true, col, alp, na)) {
+			col[cdst] = nc;
+			alp[adst] = na;
+			continue;
+		}
 		const int k = pc.nops > pa.nops ? pc.nops : pa.nops;
 		if (e.n + k > 6) {
 			approx |= AX_STAGES;
@@ -596,12 +673,12 @@ void setupTev(TevPlan& plan)
 				passThrough(e.st[ps], 1);
 		}
 		e.n += k;
-		const uint32_t cdst = (cenv >> 22) & 3, adst = (aenv >> 22) & 3;
-		col[cdst] = Loc{false, {0, 0, 0, 0}, e.n - 1};
-		alp[adst] = Loc{false, {0, 0, 0, 0}, e.n - 1};
+		col[cdst] = atStage(e.n - 1);
+		alp[adst] = atStage(e.n - 1);
 	}
 	// the result is PREV: when the last stage did not write it, one more stage fetches it
-	if (col[0].known || col[0].stage != e.n - 1 || alp[0].known || alp[0].stage != e.n - 1) {
+	auto isLast = [&](const Loc& L) { return !L.known && !L.isSrc && L.stage >= 0 && L.stage == e.n - 1; };
+	if (!isLast(col[0]) || !isLast(alp[0])) {
 		if (e.n < 6) {
 			emitOp(e, col, alp, e.n, 0, op1(GPU_REPLACE, regIn(col, alp, 0, false, false)), GPU_TEVSCALE_1);
 			emitOp(e, col, alp, e.n, 1, op1(GPU_REPLACE, regIn(col, alp, 0, true, true)), GPU_TEVSCALE_1);
@@ -609,6 +686,24 @@ void setupTev(TevPlan& plan)
 		} else {
 			approx |= AX_DEST;
 		}
+	}
+	// constant alpha (BP CMODE1): what the EFB stores as alpha, so the last stage's alpha becomes it
+	const uint32_t cm1 = g.bp[BP_CMODE1];
+	if ((cm1 >> 8) & 1) {
+		int last = e.n < 6 ? e.n : 5;
+		if (last == e.n) {
+			passThrough(e.st[last], 0);
+			e.n++;
+		}
+		PStage& st = e.st[last];
+		st.func[1] = GPU_REPLACE;
+		st.scale[1] = GPU_TEVSCALE_1;
+		st.src[1][0] = st.src[1][1] = st.src[1][2] = GPU_CONSTANT;
+		st.op[1][0] = st.op[1][1] = st.op[1][2] = GPU_TEVOP_A_SRC_ALPHA;
+		st.k[3] = cm1 & 0xFF;
+		const uint32_t cm0 = g.bp[BP_CMODE0], sf = (cm0 >> 8) & 7, df = (cm0 >> 5) & 7;
+		if ((cm0 & 1) && (sf == 4 || sf == 5 || df == 4 || df == 5))
+			approx |= AX_ALPHA_TEST;  // blending by source alpha now sees the constant
 	}
 	approx |= e.why;
 
