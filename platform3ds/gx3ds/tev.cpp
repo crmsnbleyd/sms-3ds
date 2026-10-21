@@ -606,7 +606,7 @@ void setupTev(TevPlan& plan, uint32_t copyMaps)
 	// their body texture or the goop texture, and without it they are drawn clean (compare true).
 	struct Pair {
 		int map, coord;
-		bool cmp;
+		int cmp;  // the compare stage this unit is baked for (each its own: their masks differ), or -1
 	} pairs[16];
 	int npairs = 0, stagePair[16];
 	for (uint32_t s = 0; s < nst; s++) {
@@ -615,8 +615,10 @@ void setupTev(TevPlan& plan, uint32_t copyMaps)
 		if (!((ord >> 6) & 1))
 			continue;
 		const int map = ord & 7, coord = (ord >> 3) & 7;
-		const bool cmpStage = (((g.bp[BP_TEV_COLOR_ENV + 2 * s] >> 16) & 3) == 3) ||
-		                      (((g.bp[BP_TEV_COLOR_ENV + 2 * s + 1] >> 16) & 3) == 3);
+		const int cmpStage = ((((g.bp[BP_TEV_COLOR_ENV + 2 * s] >> 16) & 3) == 3) ||
+		                      (((g.bp[BP_TEV_COLOR_ENV + 2 * s + 1] >> 16) & 3) == 3))
+		                         ? (int)s
+		                         : -1;
 		int i = 0;
 		while (i < npairs && !(pairs[i].map == map && pairs[i].coord == coord && pairs[i].cmp == cmpStage))
 			i++;
@@ -631,7 +633,7 @@ void setupTev(TevPlan& plan, uint32_t copyMaps)
 		plan.cmp[u].on = false;
 	for (int i = 0; i < npairs; i++) {
 		pairUnit[i] = -1;
-		if (dropCmp && pairs[i].cmp)
+		if (dropCmp && pairs[i].cmp >= 0)
 			continue;
 		if (plan.units < 3) {
 			pairUnit[i] = plan.units;
@@ -646,7 +648,7 @@ void setupTev(TevPlan& plan, uint32_t copyMaps)
 	bool stageCmpTrue[16];
 	for (uint32_t s = 0; s < nst; s++) {
 		stageUnit[s] = stagePair[s] < 0 ? -1 : pairUnit[stagePair[s]];
-		stageCmpTrue[s] = stagePair[s] >= 0 && dropCmp && pairs[stagePair[s]].cmp;
+		stageCmpTrue[s] = stagePair[s] >= 0 && dropCmp && pairs[stagePair[s]].cmp >= 0;
 	}
 
 	Loc col[4], alp[4];
