@@ -140,9 +140,24 @@ In rasIn(StageCtx& c, bool alphaRead)
 {
 	if (c.ras == 0)
 		return src(GPU_PRIMARY_COLOR, swapSel(c.swapRas, alphaRead, c.why));
-	if (c.ras == 1)
-		c.why |= AX_CHAN1;  // channel 1 (specular in SMS) is not computed: no highlight
-	return cst(0);
+	if (c.ras != 1)
+		return cst(0);
+	// Colour channel 1 is not computed by the vertex shader. Unlit, it is its material register
+	// (or vertex colour 1, read as white); lit (specular in SMS), zero: no highlight.
+	const uint32_t ctrl = g.xfReg[alphaRead ? XFR_ALPHA0CTRL + 1 : XFR_COLOR0CTRL + 1];
+	if ((g.xfReg[XFR_NUMCHANS] & 3) < 2)
+		return cst(0);
+	if (ctrl & 2) {
+		c.why |= AX_CHAN1;
+		return cst(0);
+	}
+	if (ctrl & 1) {
+		c.why |= AX_CHAN1;
+		return cst(255);
+	}
+	const uint32_t m = g.xfReg[XFR_MAT0 + 1];
+	const uint8_t v[4] = {uint8_t(m >> 24), uint8_t(m >> 16), uint8_t(m >> 8), uint8_t(m)};
+	return cstRgba(v, alphaRead);
 }
 
 In texIn(StageCtx& c, bool alphaRead)
@@ -274,8 +289,6 @@ Prog compileChan(StageCtx& c, uint32_t env, bool alpha, int maxOps)
 	const uint32_t bias = (env >> 16) & 3, sub = (env >> 18) & 1, scale = (env >> 20) & 3;
 	Prog p{};
 	p.scale = scale == 1 ? GPU_TEVSCALE_2 : scale == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1;
-	if (scale == 3)
-		c.why |= AX_SCALE_HALF;
 	if (bias == 3) {  // compare mode: pass d through
 		c.why |= AX_COMPARE;
 		p.op[p.nops++] = op1(GPU_REPLACE, d);
@@ -340,6 +353,12 @@ Prog compileChan(StageCtx& c, uint32_t env, bool alpha, int maxOps)
 	}
 	if (!ok)
 		c.why |= sub ? AX_SUB : !dz ? AX_LERP_D : bias == 1 ? AX_BIAS_HALF : AX_SIGNED;
+	if (scale == 3) {  // x 0.5: one more stage multiplying by 128/255
+		if (p.nops < maxOps && p.nops < 2)
+			p.op[p.nops++] = op2(GPU_MODULATE, temp(), cst(128));
+		else
+			c.why |= AX_SCALE_HALF;
+	}
 	return p;
 }
 
