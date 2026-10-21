@@ -821,7 +821,7 @@ void flushBatch()
 		dumpBatch(plan, why);
 	const u64 tx1 = svcGetSystemTick();
 	for (int u = 0; u < plan.units; u++)
-		C3D_TexBind(u, textureForMap(plan.map[u]));
+		C3D_TexBind(u, textureForMap(plan.map[u], plan.cmp[u]));
 	const u64 tx2 = svcGetSystemTick();
 	s_tXform += tx1 - tx0;
 	s_tTex += tx2 - tx1;

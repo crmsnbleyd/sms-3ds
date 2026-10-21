@@ -212,17 +212,53 @@ inline uint32_t tiled(uint32_t x, uint32_t y, uint32_t w)
 struct Key {
 	const uint8_t* ptr;
 	uint32_t fmt, w, h, tlutOff, tlutFmt;
+	TexCmp cmp;
 	bool operator==(const Key& o) const
 	{
-		return ptr == o.ptr && fmt == o.fmt && w == o.w && h == o.h && tlutOff == o.tlutOff && tlutFmt == o.tlutFmt;
+		return ptr == o.ptr && fmt == o.fmt && w == o.w && h == o.h && tlutOff == o.tlutOff && tlutFmt == o.tlutFmt &&
+		       cmp == o.cmp;
 	}
 };
 struct KeyHash {
 	size_t operator()(const Key& k) const
 	{
-		return (size_t)k.ptr * 31u ^ k.fmt * 131u ^ k.w * 7919u ^ k.h * 104729u ^ k.tlutOff * 13u ^ k.tlutFmt;
+		size_t h = (size_t)k.ptr * 31u ^ k.fmt * 131u ^ k.w * 7919u ^ k.h * 104729u ^ k.tlutOff * 13u ^ k.tlutFmt;
+		if (k.cmp.on)
+			h ^= 0x9E3779B9u * (k.cmp.op + 1u + 8u * (uint32_t)(k.cmp.sel + 1) + 64u * k.cmp.ref[0] + 16384u * k.cmp.ref[3]);
+		return h;
 	}
 };
+
+// The compare `c` applied to every texel of `rgba` (n texels).
+void bakeCompare(uint8_t* rgba, size_t n, const TexCmp& c)
+{
+	for (size_t i = 0; i < n; i++) {
+		uint8_t* t = rgba + 4 * i;
+		uint8_t tv[4];
+		for (int k = 0; k < 3; k++)
+			tv[k] = c.sel < 0 ? t[k] : t[c.sel];
+		tv[3] = t[3];
+		const uint8_t* a = c.texIsB ? c.ref : tv;
+		const uint8_t* b = c.texIsB ? tv : c.ref;
+		auto v = [](const uint8_t* x, int bytes) {  // R8, GR16, BGR24 as integers
+			uint32_t r = 0;
+			for (int k = bytes - 1; k >= 0; k--)
+				r = r << 8 | x[k];
+			return r;
+		};
+		uint8_t out[4];
+		if (c.op < 6) {
+			const int bytes = 1 + c.op / 2;
+			const bool gt = !(c.op & 1);
+			const bool r = gt ? v(a, bytes) > v(b, bytes) : v(a, bytes) == v(b, bytes);
+			memset(out, r ? 255 : 0, 4);
+		} else {
+			for (int k = 0; k < 4; k++)
+				out[k] = (c.op == 6 ? a[k] > b[k] : a[k] == b[k]) ? 255 : 0;
+		}
+		memcpy(t, out, 4);
+	}
+}
 struct Entry {
 	C3D_Tex tex;
 	bool valid = false;
@@ -252,12 +288,15 @@ void evictOld()
 	}
 }
 
-bool convert(Entry& e, const uint8_t* src, uint32_t fmt, uint32_t w, uint32_t h, const uint8_t* tlut, uint32_t tlutFmt)
+bool convert(Entry& e, const uint8_t* src, uint32_t fmt, uint32_t w, uint32_t h, const uint8_t* tlut, uint32_t tlutFmt,
+             const TexCmp& cmp)
 {
 	s_rgba.resize((size_t)w * h * 4);
 	decode(src, fmt, w, h, tlut, tlutFmt, s_rgba.data());
+	if (cmp.on)
+		bakeCompare(s_rgba.data(), (size_t)w * h, cmp);
 	const uint32_t pw = pot(w), ph = pot(h);
-	GPU_TEXCOLOR pf = (fmt == 4) ? GPU_RGB565 : (fmt <= 3) ? GPU_LA8 : GPU_RGBA8;
+	GPU_TEXCOLOR pf = cmp.on ? GPU_RGBA8 : (fmt == 4) ? GPU_RGB565 : (fmt <= 3) ? GPU_LA8 : GPU_RGBA8;
 	if (e.valid && (e.tex.width != pw || e.tex.height != ph || e.tex.fmt != pf)) {
 		C3D_TexDelete(&e.tex);
 		s_cacheBytes -= e.texBytes;
@@ -320,7 +359,7 @@ C3D_Tex* withSampler(C3D_Tex* t, uint32_t mode0)
 
 // The texture for GX map `map` with its sampler state applied: an EFB copy drawn there, the
 // texture converted from RAM, or an 8x8 white texture.
-C3D_Tex* textureForMap(int map)
+C3D_Tex* textureForMap(int map, const TexCmp& cmp)
 {
 	if (!s_whiteInit) {
 		C3D_TexInit(&s_white, 8, 8, GPU_RGBA8);
@@ -334,12 +373,12 @@ C3D_Tex* textureForMap(int map)
 	const uint32_t w = (img0 & 0x3FF) + 1, h = ((img0 >> 10) & 0x3FF) + 1, fmt = (img0 >> 20) & 15;
 	const uint8_t* ptr = g.texImage[map];
 	if (C3D_Tex* ct = copyTexture(ptr))
-		return withSampler(ct, mode0);
+		return withSampler(ct, mode0);  // (a compare against an EFB copy is not baked: approximated)
 	if (!ptr || !levelBytes(fmt, w, h))
 		return &s_white;
 
 	const bool ci = fmt == 8 || fmt == 9 || fmt == 10;
-	Key key{ptr, fmt, w, h, ci ? (tlutReg & 0x3FF) : 0, ci ? ((tlutReg >> 10) & 3) : 0};
+	Key key{ptr, fmt, w, h, ci ? (tlutReg & 0x3FF) : 0, ci ? ((tlutReg >> 10) & 3) : 0, cmp};
 	const uint8_t* tlut = ci ? g.tlutMem + ((tlutReg & 0x3FF) << 9) : nullptr;
 	const uint32_t bytes = levelBytes(fmt, w, h);
 	Entry& e = s_cache[key];
@@ -351,7 +390,7 @@ C3D_Tex* textureForMap(int map)
 		e.checkedClock = writeClock();
 		e.checkedFrame = g_displayFrames;
 		if (!e.valid || hsh != e.hash || e.bytes != bytes) {
-			if (!convert(e, ptr, fmt, w, h, tlut, key.tlutFmt))
+			if (!convert(e, ptr, fmt, w, h, tlut, key.tlutFmt, cmp))
 				return &s_white;
 			e.hash = hsh;
 			e.bytes = bytes;

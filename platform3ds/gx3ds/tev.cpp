@@ -103,6 +103,7 @@ struct StageCtx {
 	uint32_t swapRas, swapTex;  // swap tables (2 bits per component: r g b a)
 	uint32_t kcsel, kasel;
 	uint32_t why;
+	TexCmp* cmp;  // the compare baked into this stage's texture unit (null without a texture)
 };
 
 In konst(uint32_t sel, bool alpha)
@@ -289,9 +290,37 @@ Prog compileChan(StageCtx& c, uint32_t env, bool alpha, int maxOps)
 	const uint32_t bias = (env >> 16) & 3, sub = (env >> 18) & 1, scale = (env >> 20) & 3;
 	Prog p{};
 	p.scale = scale == 1 ? GPU_TEVSCALE_2 : scale == 2 ? GPU_TEVSCALE_4 : GPU_TEVSCALE_1;
-	if (bias == 3) {  // compare mode: pass d through
-		c.why |= AX_COMPARE;
-		p.op[p.nops++] = op1(GPU_REPLACE, d);
+	if (bias == 3) {
+		// compare mode, d + (a OP b ? c : 0): a texture against a constant is baked into the texture
+		// (TexCmp), which then holds the 0/1 result; anything else passes d through
+		const uint8_t op = (uint8_t)((scale << 1) | sub);
+		p.scale = GPU_TEVSCALE_1;  // the scale bits are the compare op here
+		auto isTex = [](const In& i) { return i.kind == K_SRC && i.src >= GPU_TEXTURE0 && i.src <= GPU_TEXTURE2; };
+		const In* t = nullptr;
+		const In* k = nullptr;
+		if (isTex(a) && b.kind == K_CONST)
+			t = &a, k = &b;
+		else if (isTex(b) && a.kind == K_CONST)
+			t = &b, k = &a;
+		TexCmp m{true, op, (int8_t)(t ? t->sel : -1), t == &b, {0, 0, 0, 0}};
+		if (k)
+			memcpy(m.ref, k->rgba, 4);
+		const bool fits = t && c.cmp && (!alpha || op >= 6) && (!c.cmp->on || *c.cmp == m);
+		if (!fits) {
+			c.why |= AX_COMPARE;
+			p.op[p.nops++] = op1(GPU_REPLACE, d);
+			return p;
+		}
+		*c.cmp = m;
+		const In mask = src(t->src, alpha ? 3 : -1);
+		if (isZero(cc, alpha))
+			p.op[p.nops++] = op1(GPU_REPLACE, d);
+		else if (isOne(cc, alpha))
+			combineD(p, d, mask, isZero(d, alpha), false, 0, maxOps);
+		else if (isZero(d, alpha))
+			p.op[p.nops++] = op2(GPU_MODULATE, cc, mask);
+		else
+			p.op[p.nops++] = mkOp(GPU_MULTIPLY_ADD, 3, cc, mask, d);
 		return p;
 	}
 	const bool dz = isZero(d, alpha);
@@ -491,23 +520,30 @@ void setupTev(TevPlan& plan)
 	const uint32_t nind = (gen >> 16) & 7;
 	uint32_t approx = (nst > 6 ? AX_STAGES : 0) | (nind > 0 ? AX_INDIRECT : 0);
 
-	// texture units: distinct (map, coord) pairs in order of use
+	// texture units: distinct (map, coord) pairs in order of use; a compare stage's texture gets its
+	// own unit (its texels become the comparison's result)
 	plan.units = 0;
 	int stageUnit[16];
+	bool unitCmp[3] = {false, false, false};
+	for (int u = 0; u < 3; u++)
+		plan.cmp[u].on = false;
 	for (uint32_t s = 0; s < nst; s++) {
 		const uint32_t ord = (g.bp[BP_TREF + (s >> 1)] >> ((s & 1) * 12)) & 0x3FF;
 		stageUnit[s] = -1;
 		if (!((ord >> 6) & 1))
 			continue;
 		const int map = ord & 7, coord = (ord >> 3) & 7;
+		const bool cmpStage = s < 16 && ((((g.bp[BP_TEV_COLOR_ENV + 2 * s] >> 16) & 3) == 3) ||
+		                                 (((g.bp[BP_TEV_COLOR_ENV + 2 * s + 1] >> 16) & 3) == 3));
 		int u = -1;
 		for (int i = 0; i < plan.units; i++)
-			if (plan.map[i] == map && plan.coord[i] == coord)
+			if (plan.map[i] == map && plan.coord[i] == coord && unitCmp[i] == cmpStage)
 				u = i;
 		if (u < 0 && plan.units < 3) {
 			u = plan.units++;
 			plan.map[u] = map;
 			plan.coord[u] = coord;
+			unitCmp[u] = cmpStage;
 		}
 		if (u < 0)
 			approx |= AX_UNITS;
@@ -536,7 +572,7 @@ void setupTev(TevPlan& plan)
 		};
 		const uint32_t ord = (g.bp[BP_TREF + (s >> 1)] >> ((s & 1) * 12)) & 0x3FF;
 		StageCtx c{col, alp, stageUnit[s], (int)((ord >> 7) & 7), swapTable(rswap), swapTable(tswap), ksel & 31,
-		           ksel >> 5, 0};
+		           ksel >> 5, 0, stageUnit[s] >= 0 ? &plan.cmp[stageUnit[s]] : nullptr};
 		// two PICA stages for this GX stage only while every later GX stage keeps at least one
 		const int maxOps = 6 - e.n - (ngx - s - 1) >= 2 ? 2 : 1;
 		Prog pc = compileChan(c, cenv, false, maxOps);

@@ -39,11 +39,28 @@ enum : uint32_t {
 	AX_COPY = 1u << 17,       // render.cpp: an EFB copy's format (depth, intensity)
 };
 
+// A TEV compare-mode stage between a texture and a constant, baked into the texture: each texel
+// becomes the comparison's result (0 or 255 per channel). `op` is GX's (0 R8 GT, 1 R8 EQ, 2 GR16 GT,
+// 3 GR16 EQ, 4 BGR24 GT, 5 BGR24 EQ, 6 RGB8 GT, 7 RGB8 EQ; alpha: A8 for 6/7).
+struct TexCmp {
+	bool on;
+	uint8_t op;
+	int8_t sel;      // which texture components feed the compare: -1 rgb, 0..3 one broadcast
+	bool texIsB;     // the texture is the right-hand operand
+	uint8_t ref[4];  // the constant operand
+	bool operator==(const TexCmp& o) const
+	{
+		return on == o.on && (!on || (op == o.op && sel == o.sel && texIsB == o.texIsB && ref[0] == o.ref[0] &&
+		                              ref[1] == o.ref[1] && ref[2] == o.ref[2] && ref[3] == o.ref[3]));
+	}
+};
+
 // tev.cpp: what the current TEV needs, and the combiners set up for it (setupTev).
 struct TevPlan {
 	int units;       // texture units used (0..3)
 	int map[3];      // GX texture map per unit
 	int coord[3];    // GX texture coordinate per unit
+	TexCmp cmp[3];   // per unit: a compare baked into the texture
 	uint32_t why;    // AX_* approximations made
 };
 void setupTev(TevPlan& plan);
@@ -57,7 +74,7 @@ bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* ba
 extern uint32_t g_vtxWhy;  // AX_* approximations made by the last vtxSetup
 
 // texture.cpp: GX texture map `map` (0..7) as a PICA texture with its wrap/filter state, or white.
-C3D_Tex* textureForMap(int map);
+C3D_Tex* textureForMap(int map, const TexCmp& cmp);
 uint32_t gxTexBytes(uint32_t fmt, uint32_t w, uint32_t h);  // bytes of one GX texture level
 
 // render.cpp: the texture an EFB copy (GXCopyTex) last drew for destination `ptr`, or null.
