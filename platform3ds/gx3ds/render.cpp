@@ -898,8 +898,12 @@ void flushBatch()
 	if (s_dump)
 		dumpBatch(plan, why);
 	const u64 tx1 = svcGetSystemTick();
-	for (int u = 0; u < plan.units; u++)
-		C3D_TexBind(u, textureForMap(plan.map[u], plan.cmp[u]));
+	for (int u = 0; u < plan.units; u++) {
+		// unit 0 divides its coordinates by texcoord0w (1 unless the texgen is projective, gx.v.pica)
+		C3D_Tex* t = textureForMap(plan.map[u], plan.cmp[u]);
+		t->param = (t->param & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(u == 0 ? GPU_TEX_PROJECTION : GPU_TEX_2D);
+		C3D_TexBind(u, t);
+	}
 	const u64 tx2 = svcGetSystemTick();
 	s_tXform += tx1 - tx0;
 	s_tTex += tx2 - tx1;

@@ -25,7 +25,8 @@
 
 .out outpos position
 .out outclr color
-.out outtc0 texcoord0
+.out outtc0 texcoord0.st
+.out -      texcoord0w outtc0.p   ; unit 0 samples in projection mode: (s, t) / w per pixel
 .out outtc1 texcoord1
 .out outtc2 texcoord2
 
@@ -200,6 +201,8 @@
 
 ; texgen for one unit: source row from (r0 position, r2 normal, r12 tex0, r11 tex1), z fixed up,
 ; through xf[row..row+2], projective divide by weight, SRTG by weight (r15 = colour). Result in r9.
+; Unit 0 leaves the projective divide to the texture unit (per pixel, as GX does): it outputs
+; (s, t, q) with q = 1 when not projective; units 1 and 2 divide per vertex.
 .proc texgen0
 	mul r7, tgsrc[0].xxxx, r0
 	mad r7, r2, tgsrc[0].yyyy, r7
@@ -217,11 +220,10 @@
 	add r10.x, -k0.y, r9.z
 	mul r10.x, tgp[0].z, r10.x
 	add r10.x, k0.y, r10.x
-	rcp r10.x, r10.x
-	mul r9.xy, r9.xy, r10.x
-	add r10.xy, r15.xy, -r9.xy
-	mul r10.xy, tgp[0].w, r10.xy
-	add outtc0.xy, r9.xy, r10.xy
+	add r13.xy, r15.xy, -r9.xy
+	mul r13.xy, tgp[0].w, r13.xy
+	add outtc0.xy, r9.xy, r13.xy
+	mov outtc0.z, r10.x
 .end
 
 .proc texgen1
