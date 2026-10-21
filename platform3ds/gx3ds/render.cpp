@@ -83,6 +83,7 @@ const u32 kTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) |
                            GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
 void freeRetired();
+void storeWriteBacks();
 
 void beginFrame()
 {
@@ -94,6 +95,7 @@ void beginFrame()
 	// on its own retrace timer (vi.cpp). Waits only while the GPU still draws the previous frame.
 	C3D_FrameBegin(0);
 	s_tWait += svcGetSystemTick() - t0;
+	storeWriteBacks();
 	C3D_FrameDrawOn(s_target);
 	s_vertUsed = s_idxUsed = 0;
 	if (s_clearPending) {
@@ -252,12 +254,19 @@ struct CopyTex {
 	uint32_t clock = 0, bytes = 0;
 	uint32_t frame = 0;  // display frame of the last copy here
 	bool current = false;  // no CPU write to the destination since the copy
+	// write-back to RAM (the game reads some copies on the CPU): the copy texture's tiles are
+	// moved into `lin` by the GPU at the end of the copy, and encoded into `dest` next frame
+	uint8_t* lin = nullptr;
+	bool pending = false;
+	const void* dest = nullptr;
+	uint32_t layout = 0, tw = 0, th = 0;
 };
 std::unordered_map<const void*, CopyTex> s_copies;
 std::vector<CopyTex> s_retired;  // replaced while a frame in flight may still sample them
 C3D_Tex s_efbTex;
 bool s_efbTexOk;
 bool s_copyFlipS, s_copyFlipT;  // measured at start-up (calibrateCopies)
+bool s_calibrating;              // no write-back: the calibration's destination is a small probe
 
 // Copy textures not copied to for two seconds (their buffers were freed: a new area allocates new
 // ones) are released when VRAM runs low; render targets can only be deleted between frames.
@@ -276,8 +285,19 @@ void freeRetired()
 	for (CopyTex& c : s_retired) {
 		C3D_RenderTargetDelete(c.rt);
 		C3D_TexDelete(&c.tex);
+		if (c.lin)
+			linearFree(c.lin);
 	}
 	s_retired.clear();
+}
+
+// Texel (x, y) of a PICA texture w texels wide: 8x8 tiles in rows, Morton order inside a tile.
+uint32_t mortonOffset(uint32_t x, uint32_t y, uint32_t w)
+{
+	uint32_t m = 0;
+	for (int b = 0; b < 3; b++)
+		m |= ((x >> b) & 1) << (2 * b) | ((y >> b) & 1) << (2 * b + 1);
+	return (((y >> 3) * (w >> 3) + (x >> 3)) << 6) + m;
 }
 
 uint32_t potClamp(uint32_t v)
@@ -320,8 +340,10 @@ void copyToTexture(uint32_t ctrl)
 
 	CopyTex& c = s_copies[dest];
 	if (c.rt && (c.tex.width != pw || c.tex.height != ph)) {
-		s_retired.push_back(c);
+		s_retired.push_back(c);  // it owns the textures and the write-back buffer now
 		c.rt = nullptr;
+		c.lin = nullptr;
+		c.pending = false;
 	}
 	if (!c.rt) {
 		if (!C3D_TexInitVRAM(&c.tex, (u16)pw, (u16)ph, GPU_RGBA8)) {
@@ -468,18 +490,124 @@ void copyToTexture(uint32_t ctrl)
 	C3D_BindProgram(&s_gxProg);
 	vtxInvalidate();
 	s_lastPixelValid = false;
+
+	// Write-back for copies the CPU may read: small ones (the sun's visibility check) and ones over
+	// memory the game wrote itself (the goop map, read by TPollutionLayer::isPolluted).
+	if (!s_calibrating && c.bytes && (c.bytes <= (64u << 10) || !unwrittenSince(dest, c.bytes, 0))) {
+		const size_t size = c.tex.size;
+		if (!c.lin)
+			c.lin = (uint8_t*)linearAlloc(size);
+		if (c.lin) {
+			const u32 line = (u32)c.tex.width * 8 * 4 / 16;  // one row of tiles, in 16-byte units
+			C3D_SyncTextureCopy((u32*)c.tex.data, GX_BUFFER_DIM(line, 0), (u32*)c.lin, GX_BUFFER_DIM(line, 0),
+			                    (u32)size, GX_TRANSFER_RAW_COPY(1));
+			c.pending = true;
+			c.dest = dest;
+			c.layout = layout;
+			c.tw = tw;
+			c.th = th;
+		}
+	}
+}
+
+// One texel (r, g, b, a) of a write-back, in the GX layout `layout` (gx_texture.cpp copyLayout).
+void encodeCopy(const CopyTex& c, uint8_t* out)
+{
+	const uint32_t L = c.layout, w = c.tw, h = c.th, pw = c.tex.width, ph = c.tex.height;
+	static const uint8_t kTw[7] = {8, 8, 8, 4, 4, 4, 4}, kTh[7] = {8, 4, 4, 4, 4, 4, 4};
+	const uint32_t tileW = kTw[L], tileH = kTh[L], cols = (w + tileW - 1) / tileW, rows = (h + tileH - 1) / tileH;
+	auto texel = [&](uint32_t x, uint32_t y, uint8_t* t) {  // r, g, b, a of GX texel (x, y)
+		if (x >= w || y >= h) {
+			memset(t, 0, 4);
+			return;
+		}
+		const uint32_t sx = x * pw / w, sy = y * ph / h;
+		const uint8_t* d = c.lin + 4 * mortonOffset(sx, ph - 1 - sy, pw);  // stored A, B, G, R
+		t[0] = d[3], t[1] = d[2], t[2] = d[1], t[3] = d[0];
+	};
+	auto n4 = [](uint8_t v) { return (uint32_t)(v * 15 + 127) / 255; };
+	uint8_t* p = out;
+	uint8_t t[4], u[4];
+	for (uint32_t ty = 0; ty < rows; ty++)
+		for (uint32_t tx = 0; tx < cols; tx++) {
+			const uint32_t x0 = tx * tileW, y0 = ty * tileH;
+			switch (L) {
+			case 0:  // I4
+				for (uint32_t i = 0; i < 64; i += 2) {
+					texel(x0 + (i & 7), y0 + (i >> 3), t);
+					texel(x0 + ((i + 1) & 7), y0 + ((i + 1) >> 3), u);
+					*p++ = (uint8_t)(n4(t[0]) << 4 | n4(u[0]));
+				}
+				break;
+			case 1:  // I8
+				for (uint32_t i = 0; i < 32; i++) {
+					texel(x0 + (i & 7), y0 + (i >> 3), t);
+					*p++ = t[0];
+				}
+				break;
+			case 2:  // IA4
+				for (uint32_t i = 0; i < 32; i++) {
+					texel(x0 + (i & 7), y0 + (i >> 3), t);
+					*p++ = (uint8_t)(n4(t[3]) << 4 | n4(t[0]));
+				}
+				break;
+			case 3:  // IA8
+				for (uint32_t i = 0; i < 16; i++) {
+					texel(x0 + (i & 3), y0 + (i >> 2), t);
+					*p++ = t[3];
+					*p++ = t[0];
+				}
+				break;
+			case 4:  // RGB565
+				for (uint32_t i = 0; i < 16; i++) {
+					texel(x0 + (i & 3), y0 + (i >> 2), t);
+					const uint32_t v = (t[0] >> 3) << 11 | (t[1] >> 2) << 5 | (t[2] >> 3);
+					*p++ = (uint8_t)(v >> 8);
+					*p++ = (uint8_t)v;
+				}
+				break;
+			case 5:  // RGB5A3
+				for (uint32_t i = 0; i < 16; i++) {
+					texel(x0 + (i & 3), y0 + (i >> 2), t);
+					uint32_t v;
+					if (t[3] >= 0xE0)
+						v = 0x8000 | (t[0] >> 3) << 10 | (t[1] >> 3) << 5 | (t[2] >> 3);
+					else
+						v = (uint32_t)(t[3] >> 5) << 12 | (t[0] >> 4) << 8 | (t[1] >> 4) << 4 | (t[2] >> 4);
+					*p++ = (uint8_t)(v >> 8);
+					*p++ = (uint8_t)v;
+				}
+				break;
+			default:  // RGBA8: AR plane, then GB plane
+				for (uint32_t i = 0; i < 16; i++) {
+					texel(x0 + (i & 3), y0 + (i >> 2), t);
+					p[2 * i] = t[3];
+					p[2 * i + 1] = t[0];
+					p[32 + 2 * i] = t[1];
+					p[32 + 2 * i + 1] = t[2];
+				}
+				p += 64;
+				break;
+			}
+		}
+}
+
+// The previous frame's write-backs, now that the GPU has finished it (beginFrame).
+void storeWriteBacks()
+{
+	for (auto& kv : s_copies) {
+		CopyTex& c = kv.second;
+		if (!c.pending)
+			continue;
+		c.pending = false;
+		GSPGPU_InvalidateDataCache(c.lin, c.tex.size);
+		encodeCopy(c, (uint8_t*)const_cast<void*>(c.dest));
+	}
 }
 
 // Where a copied texel lands is measured rather than trusted: a red quad over the EFB's top-left
 // quadrant goes through copyToTexture, and the copy texture is read back to see which quadrant
 // came out red. A copy whose red is elsewhere sets s_copyFlipS / s_copyFlipT.
-uint32_t mortonOffset(uint32_t x, uint32_t y, uint32_t w)
-{
-	uint32_t m = 0;
-	for (int b = 0; b < 3; b++)
-		m |= ((x >> b) & 1) << (2 * b) | ((y >> b) & 1) << (2 * b + 1);
-	return (((y >> 3) * (w >> 3) + (x >> 3)) << 6) + m;
-}
 
 void calibrateCopies()
 {
@@ -495,7 +623,9 @@ void calibrateCopies()
 	g.bp[BP_COPY_SRC_WH] = 639u | 479u << 10;
 	g.bp[BP_PE_CONTROL] = 0;
 	g.copyDest = probe;
+	s_calibrating = true;
 	copyToTexture(6u << 4);  // RGBA8
+	s_calibrating = false;
 	C3D_FrameEnd(0);
 	s_inFrame = false;
 	C3D_FrameBegin(0);  // waits for the GPU
