@@ -65,6 +65,7 @@ bool s_inFrame;
 bool s_clearPending = true;
 u32 s_clearColor = 0x000000FF, s_clearDepth = 0xFFFFFF;
 uint32_t s_frameBatches, s_frameVerts;
+bool s_lastPixelValid;  // the pixel state set up for the previous batch still holds (flushBatch)
 
 // Per-frame profile (system ticks, 268 MHz), published to the HUD at each display copy.
 u64 s_tFlush, s_tXform, s_tTex, s_tWait, s_lastPresent;  // xform: vertex set-up (attributes, uniforms)
@@ -211,6 +212,41 @@ void drawSideBars()
 	// back to the GX program; its uniforms (the passthru program's constant shares them) are resent
 	C3D_BindProgram(&s_gxProg);
 	vtxInvalidate();
+	s_lastPixelValid = false;
+}
+
+// The BP state applyState and setupTev read. Consecutive batches often differ only in XF (matrices),
+// so when this snapshot matches the previous batch's, the combiners, blending, depth and alpha test
+// set up for it still hold and are not rebuilt.
+struct PixelState {
+	uint32_t w[68];
+	bool operator==(const PixelState& o) const { return memcmp(w, o.w, sizeof w) == 0; }
+};
+PixelState s_lastPixel;
+TevPlan s_lastPlan;
+
+void snapshotPixel(PixelState& p)
+{
+	int n = 0;
+	p.w[n++] = g.bp[BP_GENMODE];
+	p.w[n++] = g.bp[BP_ZMODE];
+	p.w[n++] = g.bp[BP_CMODE0];
+	p.w[n++] = g.bp[BP_CMODE1];
+	p.w[n++] = g.bp[BP_PE_CONTROL];
+	p.w[n++] = g.bp[BP_ALPHACOMPARE];
+	p.w[n++] = g.bp[BP_FOG3];
+	for (int i = 0; i < 32; i++)
+		p.w[n++] = g.bp[BP_TEV_COLOR_ENV + i];
+	for (int i = 0; i < 8; i++)
+		p.w[n++] = g.bp[BP_TREF + i];
+	for (int i = 0; i < 8; i++)
+		p.w[n++] = g.bp[BP_TEV_KSEL + i];
+	for (int i = 0; i < 8; i++)
+		p.w[n++] = g.bp[BP_TEV_REG + i];
+	for (int i = 0; i < 8; i++)
+		p.w[n++] = g.kreg[i];
+	while (n < 68)
+		p.w[n++] = 0;
 }
 
 void resetBatch()
@@ -408,9 +444,15 @@ void flushBatch()
 	s_vertUsed = (size_t)(s_batch - s_vertRing) + ((vbytes + 15) & ~(size_t)15);
 	s_idxUsed += (ibytes + 15) & ~(size_t)15;
 
-	applyState();
-	TevPlan plan;
-	setupTev(plan);
+	PixelState ps;
+	snapshotPixel(ps);
+	if (!s_lastPixelValid || !(ps == s_lastPixel)) {
+		applyState();
+		setupTev(s_lastPlan);
+		s_lastPixel = ps;
+		s_lastPixelValid = true;
+	}
+	const TevPlan& plan = s_lastPlan;
 	const u64 tx0 = svcGetSystemTick();
 	const bool ok = vtxSetup(plan, s_fmt, s_stride, s_batch);
 	const u64 tx1 = svcGetSystemTick();
