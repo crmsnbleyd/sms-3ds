@@ -64,7 +64,100 @@ void palette(const uint8_t* tlut, uint32_t tlutFmt, uint32_t idx, uint8_t* o)
 		rgb5a3(v, o);
 }
 
-// One mip level to w*h RGBA8, top row first (sms-pc-port gx_texture.cpp decodeTexture).
+// One GX tile (kTileW x kTileH texels of `fmt`, kTileBytes at `p`) to RGBA8, rows of kTileW texels
+// (sms-pc-port gx_texture.cpp decodeTexture).
+void decodeTile(const uint8_t* p, uint32_t fmt, const uint8_t* tlut, uint32_t tlutFmt, uint8_t* out)
+{
+	switch (fmt) {
+	case 0:  // I4
+		for (uint32_t i = 0; i < 64; i++) {
+			uint8_t b = p[i >> 1];
+			uint8_t v = (i & 1) ? (b & 15) : (b >> 4);
+			memset(out + 4 * i, v * 17, 4);
+		}
+		break;
+	case 1:  // I8
+		for (uint32_t i = 0; i < 32; i++)
+			memset(out + 4 * i, p[i], 4);
+		break;
+	case 2:  // IA4
+		for (uint32_t i = 0; i < 32; i++) {
+			uint8_t* c = out + 4 * i;
+			c[0] = c[1] = c[2] = uint8_t((p[i] & 15) * 17);
+			c[3] = uint8_t((p[i] >> 4) * 17);
+		}
+		break;
+	case 3:  // IA8
+		for (uint32_t i = 0; i < 16; i++)
+			ia8(be16(p + 2 * i), out + 4 * i);
+		break;
+	case 4:  // RGB565
+		for (uint32_t i = 0; i < 16; i++)
+			rgb565(be16(p + 2 * i), out + 4 * i);
+		break;
+	case 5:  // RGB5A3
+		for (uint32_t i = 0; i < 16; i++)
+			rgb5a3(be16(p + 2 * i), out + 4 * i);
+		break;
+	case 6:  // RGBA8: AR plane then GB plane
+		for (uint32_t i = 0; i < 16; i++) {
+			uint8_t* c = out + 4 * i;
+			c[3] = p[2 * i];
+			c[0] = p[2 * i + 1];
+			c[1] = p[32 + 2 * i];
+			c[2] = p[32 + 2 * i + 1];
+		}
+		break;
+	case 8:  // C4
+		for (uint32_t i = 0; i < 64; i++) {
+			uint8_t b = p[i >> 1];
+			palette(tlut, tlutFmt, (i & 1) ? (b & 15) : (b >> 4), out + 4 * i);
+		}
+		break;
+	case 9:  // C8
+		for (uint32_t i = 0; i < 32; i++)
+			palette(tlut, tlutFmt, p[i], out + 4 * i);
+		break;
+	case 10:  // C14X2
+		for (uint32_t i = 0; i < 16; i++)
+			palette(tlut, tlutFmt, be16(p + 2 * i) & 0x3FFF, out + 4 * i);
+		break;
+	case 14:  // CMPR: 2x2 DXT1 sub-blocks
+		for (uint32_t sb = 0; sb < 4; sb++) {
+			const uint8_t* b = p + sb * 8;
+			uint16_t c0 = be16(b), c1 = be16(b + 2);
+			uint8_t pal[4][4];
+			rgb565(c0, pal[0]);
+			rgb565(c1, pal[1]);
+			if (c0 > c1) {
+				for (int k = 0; k < 3; k++) {
+					pal[2][k] = uint8_t((2 * pal[0][k] + pal[1][k]) / 3);
+					pal[3][k] = uint8_t((pal[0][k] + 2 * pal[1][k]) / 3);
+				}
+				pal[2][3] = pal[3][3] = 255;
+			} else {
+				for (int k = 0; k < 3; k++) {
+					pal[2][k] = uint8_t((pal[0][k] + pal[1][k]) / 2);
+					pal[3][k] = pal[2][k];
+				}
+				pal[2][3] = 255;
+				pal[3][3] = 0;
+			}
+			uint32_t sx = (sb & 1) * 4, sy = (sb >> 1) * 4;
+			for (uint32_t r = 0; r < 4; r++) {
+				uint8_t bits = b[4 + r];
+				for (uint32_t q = 0; q < 4; q++)
+					memcpy(out + 4 * ((sy + r) * 8 + sx + q), pal[(bits >> (6 - 2 * q)) & 3], 4);
+			}
+		}
+		break;
+	default:
+		memset(out, 0xFF, 64 * 4);
+		break;
+	}
+}
+
+// One mip level to w*h RGBA8, top row first.
 void decode(const uint8_t* src, uint32_t fmt, uint32_t w, uint32_t h, const uint8_t* tlut, uint32_t tlutFmt,
             uint8_t* out)
 {
@@ -76,115 +169,13 @@ void decode(const uint8_t* src, uint32_t fmt, uint32_t w, uint32_t h, const uint
 	}
 	uint32_t cols = (w + tw - 1) / tw, rows = (h + th - 1) / th;
 	const uint8_t* p = src;
+	uint8_t tile[64 * 4];
 	for (uint32_t ty = 0; ty < rows; ty++) {
-		for (uint32_t tx = 0; tx < cols; tx++) {
-			uint32_t x0 = tx * tw, y0 = ty * th;
-			auto put = [&](uint32_t x, uint32_t y, const uint8_t* c) {
-				if (x < w && y < h)
-					memcpy(out + (size_t(y) * w + x) * 4, c, 4);
-			};
-			uint8_t c[4];
-			switch (fmt) {
-			case 0:  // I4
-				for (uint32_t i = 0; i < 64; i++) {
-					uint8_t b = p[i >> 1];
-					uint8_t v = (i & 1) ? (b & 15) : (b >> 4);
-					c[0] = c[1] = c[2] = c[3] = uint8_t(v * 17);
-					put(x0 + (i & 7), y0 + (i >> 3), c);
-				}
-				break;
-			case 1:  // I8
-				for (uint32_t i = 0; i < 32; i++) {
-					c[0] = c[1] = c[2] = c[3] = p[i];
-					put(x0 + (i & 7), y0 + (i >> 3), c);
-				}
-				break;
-			case 2:  // IA4
-				for (uint32_t i = 0; i < 32; i++) {
-					c[0] = c[1] = c[2] = uint8_t((p[i] & 15) * 17);
-					c[3] = uint8_t((p[i] >> 4) * 17);
-					put(x0 + (i & 7), y0 + (i >> 3), c);
-				}
-				break;
-			case 3:  // IA8
-				for (uint32_t i = 0; i < 16; i++) {
-					ia8(be16(p + 2 * i), c);
-					put(x0 + (i & 3), y0 + (i >> 2), c);
-				}
-				break;
-			case 4:  // RGB565
-				for (uint32_t i = 0; i < 16; i++) {
-					rgb565(be16(p + 2 * i), c);
-					put(x0 + (i & 3), y0 + (i >> 2), c);
-				}
-				break;
-			case 5:  // RGB5A3
-				for (uint32_t i = 0; i < 16; i++) {
-					rgb5a3(be16(p + 2 * i), c);
-					put(x0 + (i & 3), y0 + (i >> 2), c);
-				}
-				break;
-			case 6:  // RGBA8: AR plane then GB plane
-				for (uint32_t i = 0; i < 16; i++) {
-					c[3] = p[2 * i];
-					c[0] = p[2 * i + 1];
-					c[1] = p[32 + 2 * i];
-					c[2] = p[32 + 2 * i + 1];
-					put(x0 + (i & 3), y0 + (i >> 2), c);
-				}
-				break;
-			case 8:  // C4
-				for (uint32_t i = 0; i < 64; i++) {
-					uint8_t b = p[i >> 1];
-					palette(tlut, tlutFmt, (i & 1) ? (b & 15) : (b >> 4), c);
-					put(x0 + (i & 7), y0 + (i >> 3), c);
-				}
-				break;
-			case 9:  // C8
-				for (uint32_t i = 0; i < 32; i++) {
-					palette(tlut, tlutFmt, p[i], c);
-					put(x0 + (i & 7), y0 + (i >> 3), c);
-				}
-				break;
-			case 10:  // C14X2
-				for (uint32_t i = 0; i < 16; i++) {
-					palette(tlut, tlutFmt, be16(p + 2 * i) & 0x3FFF, c);
-					put(x0 + (i & 3), y0 + (i >> 2), c);
-				}
-				break;
-			case 14:  // CMPR: 2x2 DXT1 sub-blocks
-				for (uint32_t sb = 0; sb < 4; sb++) {
-					const uint8_t* b = p + sb * 8;
-					uint16_t c0 = be16(b), c1 = be16(b + 2);
-					uint8_t pal[4][4];
-					rgb565(c0, pal[0]);
-					rgb565(c1, pal[1]);
-					if (c0 > c1) {
-						for (int k = 0; k < 3; k++) {
-							pal[2][k] = uint8_t((2 * pal[0][k] + pal[1][k]) / 3);
-							pal[3][k] = uint8_t((pal[0][k] + 2 * pal[1][k]) / 3);
-						}
-						pal[2][3] = pal[3][3] = 255;
-					} else {
-						for (int k = 0; k < 3; k++) {
-							pal[2][k] = uint8_t((pal[0][k] + pal[1][k]) / 2);
-							pal[3][k] = pal[2][k];
-						}
-						pal[2][3] = 255;
-						pal[3][3] = 0;
-					}
-					uint32_t sx = x0 + (sb & 1) * 4, sy = y0 + (sb >> 1) * 4;
-					for (uint32_t r = 0; r < 4; r++) {
-						uint8_t bits = b[4 + r];
-						for (uint32_t q = 0; q < 4; q++)
-							put(sx + q, sy + r, pal[(bits >> (6 - 2 * q)) & 3]);
-					}
-				}
-				break;
-			default:
-				break;
-			}
-			p += kTileBytes[fmt];
+		for (uint32_t tx = 0; tx < cols; tx++, p += kTileBytes[fmt]) {
+			decodeTile(p, fmt, tlut, tlutFmt, tile);
+			for (uint32_t y = 0; y < th && ty * th + y < h; y++)
+				for (uint32_t x = 0; x < tw && tx * tw + x < w; x++)
+					memcpy(out + (size_t(ty * th + y) * w + tx * tw + x) * 4, tile + 4 * (y * tw + x), 4);
 		}
 	}
 }
@@ -262,10 +253,11 @@ void bakeCompare(uint8_t* rgba, size_t n, const TexCmp& c)
 struct Entry {
 	C3D_Tex tex;
 	bool valid = false;
-	uint64_t hash = 0;
+	uint64_t hash = 0, tlutHash = 0;
 	uint32_t bytes = 0;      // source bytes (level 0)
 	uint32_t checkedClock = 0, checkedFrame = 0, usedFrame = 0;
 	uint32_t texBytes = 0;   // PICA size
+	std::vector<uint8_t> shadow;  // source bytes last converted, once the texture has changed
 };
 std::unordered_map<Key, Entry, KeyHash> s_cache;
 std::vector<uint8_t> s_rgba;
@@ -288,19 +280,71 @@ void evictOld()
 	}
 }
 
-bool convert(Entry& e, const uint8_t* src, uint32_t fmt, uint32_t w, uint32_t h, const uint8_t* tlut, uint32_t tlutFmt,
-             const TexCmp& cmp)
+inline void storeTexel(uint8_t* dst, GPU_TEXCOLOR pf, uint32_t o, const uint8_t* c)
 {
-	s_rgba.resize((size_t)w * h * 4);
-	decode(src, fmt, w, h, tlut, tlutFmt, s_rgba.data());
-	if (cmp.on)
-		bakeCompare(s_rgba.data(), (size_t)w * h, cmp);
+	if (pf == GPU_RGBA8) {
+		uint8_t* d = dst + o * 4;  // little-endian 0xRRGGBBAA
+		d[0] = c[3];
+		d[1] = c[2];
+		d[2] = c[1];
+		d[3] = c[0];
+	} else if (pf == GPU_RGB565) {
+		uint16_t v = (uint16_t)((c[0] >> 3) << 11 | (c[1] >> 2) << 5 | (c[2] >> 3));
+		memcpy(dst + o * 2, &v, 2);
+	} else {  // LA8: luminance high, alpha low
+		dst[o * 2] = c[3];
+		dst[o * 2 + 1] = c[0];
+	}
+}
+
+// Converts a power-of-two texture tile by tile straight into the PICA layout. With `old` (the source
+// bytes converted last time), only the GX tiles whose bytes differ are converted: the game edits
+// some textures in place every frame (the pollution maps when sprayed). Returns tiles converted.
+uint32_t convertTiles(Entry& e, GPU_TEXCOLOR pf, const uint8_t* src, const uint8_t* old, uint32_t fmt, uint32_t w,
+                      uint32_t h, const uint8_t* tlut, uint32_t tlutFmt, const TexCmp& cmp)
+{
+	const uint32_t tw = kTileW[fmt], th = kTileH[fmt], tb = kTileBytes[fmt];
+	const uint32_t cols = w / tw, rows = h / th;
+	uint8_t* dst = (uint8_t*)e.tex.data;
+	uint8_t tile[64 * 4];
+	uint32_t n = 0;
+	for (uint32_t ty = 0; ty < rows; ty++) {
+		for (uint32_t tx = 0; tx < cols; tx++, src += tb) {
+			if (old) {
+				const bool same = !memcmp(src, old, tb);
+				old += tb;
+				if (same)
+					continue;
+			}
+			decodeTile(src, fmt, tlut, tlutFmt, tile);
+			if (cmp.on)
+				bakeCompare(tile, tw * th, cmp);
+			for (uint32_t y = 0; y < th; y++)
+				for (uint32_t x = 0; x < tw; x++)
+					storeTexel(dst, pf, tiled(tx * tw + x, h - 1 - (ty * th + y), w), tile + 4 * (y * tw + x));
+			n++;
+		}
+	}
+	return n;
+}
+
+bool convert(Entry& e, const uint8_t* src, uint32_t bytes, uint32_t fmt, uint32_t w, uint32_t h, const uint8_t* tlut,
+             uint32_t tlutFmt, uint64_t tlutHash, const TexCmp& cmp)
+{
 	const uint32_t pw = pot(w), ph = pot(h);
 	GPU_TEXCOLOR pf = cmp.on ? GPU_RGBA8 : (fmt == 4) ? GPU_RGB565 : (fmt <= 3) ? GPU_LA8 : GPU_RGBA8;
+	const bool exact = pw == w && ph == h && kTileW[fmt];
+	const bool changed = e.valid;  // a reconversion: keep the source to convert only edits next time
 	if (e.valid && (e.tex.width != pw || e.tex.height != ph || e.tex.fmt != pf)) {
 		C3D_TexDelete(&e.tex);
 		s_cacheBytes -= e.texBytes;
 		e.valid = false;
+	}
+	if (exact && e.valid && e.shadow.size() == bytes && e.tlutHash == tlutHash) {
+		if (convertTiles(e, pf, src, e.shadow.data(), fmt, w, h, tlut, tlutFmt, cmp))
+			C3D_TexFlush(&e.tex);
+		memcpy(e.shadow.data(), src, bytes);
+		return true;
 	}
 	if (!e.valid) {
 		if (!C3D_TexInit(&e.tex, (u16)pw, (u16)ph, pf))
@@ -309,25 +353,22 @@ bool convert(Entry& e, const uint8_t* src, uint32_t fmt, uint32_t w, uint32_t h,
 		e.texBytes = e.tex.size;
 		s_cacheBytes += e.texBytes;
 	}
-	uint8_t* dst = (uint8_t*)e.tex.data;
-	for (uint32_t y = 0; y < ph; y++) {
-		const uint32_t sy = y * h / ph;
-		for (uint32_t x = 0; x < pw; x++) {
-			const uint8_t* c = &s_rgba[((size_t)sy * w + x * w / pw) * 4];
-			const uint32_t o = tiled(x, ph - 1 - y, pw);
-			if (pf == GPU_RGBA8) {
-				uint8_t* d = dst + o * 4;  // little-endian 0xRRGGBBAA
-				d[0] = c[3];
-				d[1] = c[2];
-				d[2] = c[1];
-				d[3] = c[0];
-			} else if (pf == GPU_RGB565) {
-				uint16_t v = (uint16_t)((c[0] >> 3) << 11 | (c[1] >> 2) << 5 | (c[2] >> 3));
-				memcpy(dst + o * 2, &v, 2);
-			} else {  // LA8: luminance high, alpha low
-				dst[o * 2] = c[3];
-				dst[o * 2 + 1] = c[0];
-			}
+	e.tlutHash = tlutHash;
+	if (exact) {
+		convertTiles(e, pf, src, nullptr, fmt, w, h, tlut, tlutFmt, cmp);
+		if (changed)
+			e.shadow.assign(src, src + bytes);
+	} else {
+		e.shadow.clear();
+		s_rgba.resize((size_t)w * h * 4);
+		decode(src, fmt, w, h, tlut, tlutFmt, s_rgba.data());
+		if (cmp.on)
+			bakeCompare(s_rgba.data(), (size_t)w * h, cmp);
+		uint8_t* dst = (uint8_t*)e.tex.data;
+		for (uint32_t y = 0; y < ph; y++) {
+			const uint8_t* row = &s_rgba[(size_t)(y * h / ph) * w * 4];
+			for (uint32_t x = 0; x < pw; x++)
+				storeTexel(dst, pf, tiled(x, ph - 1 - y, pw), row + (x * w / pw) * 4);
 		}
 	}
 	C3D_TexFlush(&e.tex);
@@ -386,11 +427,12 @@ C3D_Tex* textureForMap(int map, const TexCmp& cmp)
 	bool check = !e.valid || g_displayFrames - e.checkedFrame >= kRecheckFrames ||
 	             !unwrittenSince(ptr, bytes, e.checkedClock);
 	if (check) {
-		uint64_t hsh = hashBytes(ptr, bytes, tlut ? hashBytes(tlut, fmt == 8 ? 32 : 512) : 0);
+		const uint64_t th = tlut ? hashBytes(tlut, fmt == 8 ? 32 : 512) : 0;
+		uint64_t hsh = hashBytes(ptr, bytes, th);
 		e.checkedClock = writeClock();
 		e.checkedFrame = g_displayFrames;
 		if (!e.valid || hsh != e.hash || e.bytes != bytes) {
-			if (!convert(e, ptr, fmt, w, h, tlut, key.tlutFmt, cmp))
+			if (!convert(e, ptr, bytes, fmt & 15, w, h, tlut, key.tlutFmt, th, cmp))
 				return &s_white;
 			e.hash = hsh;
 			e.bytes = bytes;
