@@ -218,8 +218,9 @@ void drawSideBars()
 // The BP state applyState and setupTev read. Consecutive batches often differ only in XF (matrices),
 // so when this snapshot matches the previous batch's, the combiners, blending, depth and alpha test
 // set up for it still hold and are not rebuilt.
+constexpr int kPixelWords = 7 + 32 + 8 + 8 + 8 + 8;  // must match snapshotPixel
 struct PixelState {
-	uint32_t w[68];
+	uint32_t w[kPixelWords];
 	bool operator==(const PixelState& o) const { return memcmp(w, o.w, sizeof w) == 0; }
 };
 PixelState s_lastPixel;
@@ -245,8 +246,8 @@ void snapshotPixel(PixelState& p)
 		p.w[n++] = g.bp[BP_TEV_REG + i];
 	for (int i = 0; i < 8; i++)
 		p.w[n++] = g.kreg[i];
-	while (n < 68)
-		p.w[n++] = 0;
+	if (n != kPixelWords)
+		svcBreak(USERBREAK_PANIC);
 }
 
 void resetBatch()
