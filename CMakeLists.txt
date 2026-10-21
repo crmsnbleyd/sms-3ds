@@ -112,6 +112,11 @@ endforeach()
 set(SMS_COMMON_DEFS GEKKO TARGET_PC VERSION_GMSE01 BUILD_VERSION=2 NDEBUG=1)
 # CodeWarrior's char is signed; ARM GCC's default is unsigned.
 add_compile_options(-fsigned-char)
+# CodeWarrior's enums are 4 bytes; bare-metal ARM GCC (AAPCS) sizes them to their values, which
+# shifts every struct with an enum member (GX state, structs laid over disc data). Everything that
+# shares the game's structs uses 4-byte enums; only the files that include <3ds.h> keep libctru's
+# short enums (SMS_3DS_SHORT_ENUM_SOURCES below).
+add_compile_options(-fno-short-enums)
 
 set(SMS_GAME_FLAGS
   -w -fno-strict-aliasing -fwrapv -fno-omit-frame-pointer -fno-stack-protector -ffp-contract=off
@@ -218,12 +223,20 @@ target_include_directories(sms_3ds PRIVATE
 target_compile_definitions(sms_3ds PRIVATE ${SMS_COMMON_DEFS} SMS_AUDIO_DSP_HLE=1)
 target_compile_options(sms_3ds PRIVATE -fno-strict-aliasing -Wno-unused-parameter
   $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++17>)
+# These include <3ds.h> and share structs with libctru, which is built with short enums.
+set(SMS_3DS_SHORT_ENUM_SOURCES
+  platform3ds/main_3ds.cpp platform3ds/hud.cpp platform3ds/log_3ds.cpp
+  platform3ds/port_host_3ds.cpp platform3ds/thread_3ds.cpp)
+set_source_files_properties(${SMS_3DS_SHORT_ENUM_SOURCES} PROPERTIES COMPILE_OPTIONS "-fshort-enums")
 set_source_files_properties(${SMS_PC_PORT_DIR}/platform/misc/msl_math.c ${SMS_PC_PORT_DIR}/platform/mtx/mtx.cpp
   PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 target_link_libraries(sms_3ds PRIVATE
   -Wl,--whole-archive sms_game sms_gx -Wl,--no-whole-archive
   ctru m)
 set_property(TARGET sms_3ds APPEND PROPERTY LINK_OPTIONS -Wl,-Map,${CMAKE_BINARY_DIR}/sms_3ds.map)
+# Mixed enum sizes are intended (see -fno-short-enums above): no struct with an enum member crosses
+# between libctru/<3ds.h> code and game code.
+set_property(TARGET sms_3ds APPEND PROPERTY LINK_OPTIONS -Wl,--no-enum-size-warning)
 
 # --- 3DS package --------------------------------------------------------------------------------
 ctr_generate_smdh(${CMAKE_BINARY_DIR}/sms_3ds.smdh
