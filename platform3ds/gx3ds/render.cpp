@@ -89,11 +89,11 @@ void beginFrame()
 	if (s_inFrame)
 		return;
 	const u64 t0 = svcGetSystemTick();
+	freeRetired();  // outside a frame (citro3d's rule); waits for the GPU to finish using them
 	// No C3D_FRAME_SYNCDRAW: that also waits for the next vblank, and the game already paces itself
 	// on its own retrace timer (vi.cpp). Waits only while the GPU still draws the previous frame.
 	C3D_FrameBegin(0);
 	s_tWait += svcGetSystemTick() - t0;
-	freeRetired();  // the GPU finished the frames that used them
 	C3D_FrameDrawOn(s_target);
 	s_vertUsed = s_idxUsed = 0;
 	if (s_clearPending) {
@@ -238,14 +238,27 @@ struct CopyTex {
 	C3D_Tex tex;
 	C3D_RenderTarget* rt = nullptr;
 	uint32_t clock = 0, bytes = 0;
+	uint32_t frame = 0;  // display frame of the last copy here
 };
 std::unordered_map<const void*, CopyTex> s_copies;
 std::vector<CopyTex> s_retired;  // replaced while a frame in flight may still sample them
 C3D_Tex s_efbTex;
 bool s_efbTexOk;
 
+// Copy textures not copied to for two seconds (their buffers were freed: a new area allocates new
+// ones) are released when VRAM runs low; render targets can only be deleted between frames.
 void freeRetired()
 {
+	if (vramSpaceFree() < (2u << 20)) {
+		for (auto it = s_copies.begin(); it != s_copies.end();) {
+			if (g_displayFrames - it->second.frame > 120) {
+				s_retired.push_back(it->second);
+				it = s_copies.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
 	for (CopyTex& c : s_retired) {
 		C3D_RenderTargetDelete(c.rt);
 		C3D_TexDelete(&c.tex);
@@ -315,6 +328,7 @@ void copyToTexture(uint32_t ctrl)
 	}
 	c.bytes = gxTexBytes(copyLayout(fmt, zcopy), tw, th);
 	c.clock = writeClock();
+	c.frame = g_displayFrames;
 
 	if (zcopy) {  // depth copies: far everywhere for now
 		C3D_RenderTargetClear(c.rt, C3D_CLEAR_COLOR, 0xFFFFFFFF, 0);
