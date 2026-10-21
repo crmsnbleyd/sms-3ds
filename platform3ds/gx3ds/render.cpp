@@ -239,6 +239,7 @@ struct CopyTex {
 	C3D_RenderTarget* rt = nullptr;
 	uint32_t clock = 0, bytes = 0;
 	uint32_t frame = 0;  // display frame of the last copy here
+	bool current = false;  // no CPU write to the destination since the copy
 };
 std::unordered_map<const void*, CopyTex> s_copies;
 std::vector<CopyTex> s_retired;  // replaced while a frame in flight may still sample them
@@ -329,14 +330,30 @@ void copyToTexture(uint32_t ctrl)
 	c.bytes = gxTexBytes(copyLayout(fmt, zcopy), tw, th);
 	c.clock = writeClock();
 	c.frame = g_displayFrames;
+	c.current = true;
 
 	if (zcopy) {  // depth copies: far everywhere for now
 		C3D_RenderTargetClear(c.rt, C3D_CLEAR_COLOR, 0xFFFFFFFF, 0);
 		s_frameWhy |= AX_COPY;
 		return;
 	}
-	if (((ctrl >> 15) & 3) == 3)
-		s_frameWhy |= AX_COPY;  // intensity: the colour as it is
+	// what the destination format keeps: one channel (I4/I8 layouts read it as I = A), I + A, or colour
+	const bool intensity = ((ctrl >> 15) & 3) == 3;
+	const uint32_t layout = copyLayout(fmt, zcopy);
+	enum { CH_R, CH_G, CH_B, CH_A, CH_Y, CH_RGB } ch = CH_RGB;
+	if (layout <= 3) {
+		if (intensity && fmt <= 3)
+			ch = CH_Y;
+		else if (fmt == 7)
+			ch = CH_A;
+		else if (fmt == 9 || fmt == 12)
+			ch = CH_G;
+		else if (fmt == 10)
+			ch = CH_B;
+		else
+			ch = CH_R;
+	}
+	const bool oneChannel = layout <= 1;  // I4 / I8: alpha is the same value
 
 	if (s_vertUsed + 4 * sizeof(OutVertex) > kVertRing || s_idxUsed + 6 * sizeof(uint16_t) > kIdxRing)
 		return;
@@ -390,12 +407,37 @@ void copyToTexture(uint32_t ctrl)
 	C3D_TexBind(0, &s_efbTex);
 	C3D_TexEnv* env = C3D_GetTexEnv(0);
 	C3D_TexEnvInit(env);
-	C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
-	C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
-	C3D_TexEnvSrc(env, C3D_Alpha, alphaOne ? GPU_CONSTANT : GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
-	C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-	C3D_TexEnvColor(env, 0xFFFFFFFF);
-	for (int st = 1; st < 6; st++) {
+	int first = 1;
+	if (ch == CH_Y) {
+		// Y = 0.257 R + 0.504 G + 0.098 B + 16/255 (GX's RGB -> Y). DOT3 gives 4 * sum((t - 0.5)(k - 0.5)),
+		// so k = 0.5 + w / 4 yields sum(w t) - sum(w) / 2; the second stage adds that back with the 16.
+		C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(env, C3D_RGB, GPU_DOT3_RGBA);
+		C3D_TexEnvColor(env, 144u | 160u << 8 | 134u << 16 | 255u << 24);
+		C3D_TexEnv* e1 = C3D_GetTexEnv(1);
+		C3D_TexEnvInit(e1);
+		C3D_TexEnvSrc(e1, C3D_Both, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+		C3D_TexEnvFunc(e1, C3D_Both, GPU_ADD);
+		C3D_TexEnvColor(e1, 0x7D7D7D7Du);  // 0.4295 + 16/255 = 0.492
+		first = 2;
+	} else {
+		static const GPU_TEVOP_RGB kRgb[4] = {GPU_TEVOP_RGB_SRC_R, GPU_TEVOP_RGB_SRC_G, GPU_TEVOP_RGB_SRC_B,
+		                                      GPU_TEVOP_RGB_SRC_ALPHA};
+		static const GPU_TEVOP_A kA[4] = {GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_G, GPU_TEVOP_A_SRC_B,
+		                                  GPU_TEVOP_A_SRC_ALPHA};
+		C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+		C3D_TexEnvOpRgb(env, ch == CH_RGB ? GPU_TEVOP_RGB_SRC_COLOR : kRgb[ch], GPU_TEVOP_RGB_SRC_COLOR,
+		                GPU_TEVOP_RGB_SRC_COLOR);
+		C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+		const bool alphaFromChannel = oneChannel && ch != CH_RGB;
+		const bool alphaConst = !alphaFromChannel && (alphaOne || ch == CH_A);
+		C3D_TexEnvSrc(env, C3D_Alpha, alphaConst ? GPU_CONSTANT : GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+		C3D_TexEnvOpAlpha(env, alphaFromChannel ? kA[ch] : GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA,
+		                  GPU_TEVOP_A_SRC_ALPHA);
+		C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+		C3D_TexEnvColor(env, 0xFFFFFFFF);
+	}
+	for (int st = first; st < 6; st++) {
 		C3D_TexEnv* e = C3D_GetTexEnv(st);
 		C3D_TexEnvInit(e);
 		C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
@@ -554,12 +596,10 @@ C3D_Tex* copyTexture(const void* ptr)
 	auto it = s_copies.find(ptr);
 	if (it == s_copies.end())
 		return nullptr;
-	if (!unwrittenSince(ptr, it->second.bytes, it->second.clock)) {  // the CPU wrote there since
-		s_retired.push_back(it->second);
-		s_copies.erase(it);
-		return nullptr;
-	}
-	return &it->second.tex;
+	CopyTex& c = it->second;
+	if (c.current && !unwrittenSince(ptr, c.bytes, c.clock))
+		c.current = false;  // the CPU wrote there since: RAM is the texture (kept for the next copy)
+	return c.current ? &c.tex : nullptr;
 }
 
 }  // namespace gx3ds
@@ -809,6 +849,7 @@ void executeCopy(uint32_t ctrl)
 		} else if (sms3ds_gx_dump_request) {
 			sms3ds_gx_dump_request = 0;
 			s_dump = fopen("sdmc:/3ds/sms-3ds/frame-dump.txt", "w");
+			fprintf(stderr, "[gx3ds] frame dump requested%s\n", s_dump ? "" : ": cannot open frame-dump.txt");
 			s_dumpSeen.clear();
 			s_dumpBatches = 0;
 			if (s_dump)

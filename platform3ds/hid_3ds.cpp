@@ -25,6 +25,8 @@ extern "C" void sms3ds_hid_read(Sms3dsHid* out)
 	if (k & KEY_DDOWN) out->keys |= SMS3DS_DOWN;
 	if (k & KEY_DLEFT) out->keys |= SMS3DS_LEFT;
 	if (k & KEY_DRIGHT) out->keys |= SMS3DS_RIGHT;
+	if ((k & (KEY_L | KEY_R | KEY_X)) == (KEY_L | KEY_R | KEY_X) && !sms3ds_gx_dump_request)
+		sms3ds_gx_dump_request = 1;  // frame dump (gx3ds/render.cpp)
 	out->stickX = cp.dx;
 	out->stickY = cp.dy;
 	out->cstickX = cs.dx;
