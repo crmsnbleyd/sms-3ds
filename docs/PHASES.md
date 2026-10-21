@@ -30,6 +30,16 @@
    buffers (~920k unmapped reads; Azahar ran at 7%). Cause: ARM short enums. Fixed by building with `-fno-short-enums`.
    Also seen: `/AudioRes/Seqs/JaiArcS.hed` not found, followed by null reads in MSound/JAIBasic (check after the fix).
 
+## Phase 2 run log
+
+1. 2a: orientation right; untextured surfaces white (expected).
+2. 2b: textured title and file select; textures upside down (PICA rows are bottom-up) -> fixed.
+3. 2c: title correct; Airstrip reached by hand (Peach, Mario, HUD text). ~5 fps. Profile: frame 201 ms =
+   CPU transform 141 + other flush 15 + game 38 (+ decode 3, tex 2, GPU wait 4). Fix: transform, lighting and
+   texgen moved to the PICA vertex shader (gx.v.pica); the PICA reads the front end's packed vertices in place.
+   Note: Azahar logs ConfigureNew3DSCPU as unimplemented, so it may run the CPU at 268 MHz, not 804 MHz.
+   Open: noisy textures on some Airstrip surfaces; Mario grey; lines/points not drawn.
+
 3. Enum fix confirmed: parser in sync, full speed, 468 frames. GX display lists and vertex arrays were then read
    ~128 MiB past MEM1 (the window base was added on top of OSCachedToPhysical's result). Fixed: identity window
    (patches/port/3ds-05). Minimal PADRead added.

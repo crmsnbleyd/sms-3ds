@@ -1,0 +1,273 @@
+; sms-3ds GX vertex pipeline on the PICA200 (Phase 2, GPU transform).
+; Reads the GX front end's packed vertices in place and does what sms-pc-port's generated GLSL
+; vertex shader does (platform/gx/src/gx_shader.cpp genVS), within 96 uniforms:
+;  - position through the vertex's 3x4 position matrix in XF memory (rows xf[pm..pm+2]),
+;    then projection + viewport + 4:3 letterbox + top-screen tilt folded into fin[4] by the CPU;
+;  - normal through the same matrix's 3x3 (GX's separate normal matrix is approximated: exact for
+;    rotations and uniform scale), normalised;
+;  - lighting channel 0: material/ambient from register or vertex colour, up to 3 lights with
+;    diffuse none/sign/clamp and spot attenuation (the CPU zeroes unused lights);
+;  - texgen for texture units 0..2: a source row (position, normal, tex0, tex1) through the texture
+;    matrix the CPU selects (per-vertex index byte or default), projective divide, or SRTG (colour).
+; Every switch is a weight in a uniform, so there is no branching.
+
+.fvec xf[63]            ; XF matrix memory rows 0..62 (pos 0-29, tex 30-59, identity 60-62)
+.fvec fin[4]            ; view space -> PICA clip space
+.fvec amb, mat          ; channel 0 ambient / material colour (0..1)
+.fvec lmode             ; (diffuse none, sign, clamp, spot attenuation) weights
+.fvec chan              ; (material from vertex, ambient from vertex, colour lit, alpha lit)
+.fvec lcol[3], lpos[3], ldir[3], latA[3], latK[3]
+.fvec tgp[3]            ; per unit (z scale, z add, projective, SRTG)
+.fvec tgsrc[3]          ; per unit source weights (position, normal, tex0, tex1)
+.fvec tgsel[3]          ; per unit (constant matrix row, weights for the tex0/tex1/tex2 index bytes)
+
+.constf k0(0.0, 1.0, 0.00392156862745, 1e-30)
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+
+.alias inpos  v0        ; float3
+.alias innrm  v1        ; float3 (fixed 0,0,1 when absent)
+.alias inclr  v2        ; ubyte4 (fixed 255 when absent)
+.alias intex0 v3        ; float2
+.alias intex1 v4        ; float2
+.alias inmtx  v5        ; ubyte4: position, tex0, tex1, tex2 matrix rows (fixed defaults when absent)
+
+.proc main
+	; r0 = (position, 1)
+	mov r0.xyz, inpos
+	mov r0.w, k0.y
+	; r1 = view-space position
+	mova a0.x, inmtx.x
+	dp4 r1.x, xf[a0.x+0], r0
+	dp4 r1.y, xf[a0.x+1], r0
+	dp4 r1.z, xf[a0.x+2], r0
+	mov r1.w, k0.y
+	dp4 outpos.x, fin[0], r1
+	dp4 outpos.y, fin[1], r1
+	dp4 outpos.z, fin[2], r1
+	dp4 outpos.w, fin[3], r1
+
+	; r2 = (normal, 1); r3 = view-space normal, normalised
+	mov r2.xyz, innrm
+	mov r2.w, k0.y
+	dp3 r3.x, xf[a0.x+0], r2
+	dp3 r3.y, xf[a0.x+1], r2
+	dp3 r3.z, xf[a0.x+2], r2
+	dp3 r4.x, r3, r3
+	max r4.x, k0.w, r4.x
+	rsq r4.x, r4.x
+	mul r3.xyz, r3, r4.x
+
+	; r5 = vertex colour (0..1); r6 = material, r13 = ambient (register or vertex colour)
+	mul r5, k0.z, inclr
+	add r6, -mat, r5
+	mul r6, chan.xxxx, r6
+	add r6, mat, r6
+	add r13, -amb, r5
+	mul r13, chan.yyyy, r13
+	add r13, amb, r13
+
+	; lights 0..2 accumulate into r13
+	add r7.xyz, lpos[0], -r1
+	call light0
+	add r7.xyz, lpos[1], -r1
+	call light1
+	add r7.xyz, lpos[2], -r1
+	call light2
+
+	; colour = material * clamp(sum) where lit, else material
+	max r13, k0.x, r13
+	min r13, k0.y, r13
+	mul r14, r6, r13
+	add r14, -r6, r14
+	mul r14, chan.zzzw, r14
+	add r15, r6, r14
+	mov outclr, r15
+
+	; texgen per unit
+	mov r12, intex0
+	mov r11, intex1
+	call texgen0
+	call texgen1
+	call texgen2
+	end
+.end
+
+; r7 = light position - vertex; uses r8-r10, r12 scratch; adds into r13
+.proc light0
+	dp3 r8.x, r7, r7
+	max r8.x, k0.w, r8.x
+	rsq r8.y, r8.x
+	mul r7.xyz, r7, r8.y
+	rcp r8.z, r8.y
+	dp3 r9.x, r3, r7
+	max r9.y, k0.x, r9.x
+	mul r9.z, lmode.y, r9.x
+	mad r9.z, r9.y, lmode.z, r9.z
+	add r9.z, lmode.x, r9.z
+	dp3 r10.x, ldir[0], r7
+	max r10.x, k0.x, r10.x
+	mul r10.y, r10.x, r10.x
+	mov r10.w, k0.y
+	mov r8.w, k0.y
+	; (1, cs, cs^2) . A
+	mov r10.z, r10.y
+	mov r10.y, r10.x
+	mov r10.x, k0.y
+	dp3 r9.w, latA[0], r10
+	max r9.w, k0.x, r9.w
+	; (1, d, d^2) . K
+	mov r10.y, r8.z
+	mov r10.z, r8.x
+	dp3 r10.w, latK[0], r10
+	max r10.w, k0.w, r10.w
+	rcp r10.w, r10.w
+	mul r9.w, r9.w, r10.w
+	add r9.w, -k0.y, r9.w
+	mul r9.w, lmode.w, r9.w
+	add r9.w, k0.y, r9.w
+	mul r9.w, r9.w, r9.z
+	mad r13, r9.wwww, lcol[0], r13
+.end
+
+.proc light1
+	dp3 r8.x, r7, r7
+	max r8.x, k0.w, r8.x
+	rsq r8.y, r8.x
+	mul r7.xyz, r7, r8.y
+	rcp r8.z, r8.y
+	dp3 r9.x, r3, r7
+	max r9.y, k0.x, r9.x
+	mul r9.z, lmode.y, r9.x
+	mad r9.z, r9.y, lmode.z, r9.z
+	add r9.z, lmode.x, r9.z
+	dp3 r10.x, ldir[1], r7
+	max r10.x, k0.x, r10.x
+	mul r10.y, r10.x, r10.x
+	mov r10.z, r10.y
+	mov r10.y, r10.x
+	mov r10.x, k0.y
+	dp3 r9.w, latA[1], r10
+	max r9.w, k0.x, r9.w
+	mov r10.y, r8.z
+	mov r10.z, r8.x
+	dp3 r10.w, latK[1], r10
+	max r10.w, k0.w, r10.w
+	rcp r10.w, r10.w
+	mul r9.w, r9.w, r10.w
+	add r9.w, -k0.y, r9.w
+	mul r9.w, lmode.w, r9.w
+	add r9.w, k0.y, r9.w
+	mul r9.w, r9.w, r9.z
+	mad r13, r9.wwww, lcol[1], r13
+.end
+
+.proc light2
+	dp3 r8.x, r7, r7
+	max r8.x, k0.w, r8.x
+	rsq r8.y, r8.x
+	mul r7.xyz, r7, r8.y
+	rcp r8.z, r8.y
+	dp3 r9.x, r3, r7
+	max r9.y, k0.x, r9.x
+	mul r9.z, lmode.y, r9.x
+	mad r9.z, r9.y, lmode.z, r9.z
+	add r9.z, lmode.x, r9.z
+	dp3 r10.x, ldir[2], r7
+	max r10.x, k0.x, r10.x
+	mul r10.y, r10.x, r10.x
+	mov r10.z, r10.y
+	mov r10.y, r10.x
+	mov r10.x, k0.y
+	dp3 r9.w, latA[2], r10
+	max r9.w, k0.x, r9.w
+	mov r10.y, r8.z
+	mov r10.z, r8.x
+	dp3 r10.w, latK[2], r10
+	max r10.w, k0.w, r10.w
+	rcp r10.w, r10.w
+	mul r9.w, r9.w, r10.w
+	add r9.w, -k0.y, r9.w
+	mul r9.w, lmode.w, r9.w
+	add r9.w, k0.y, r9.w
+	mul r9.w, r9.w, r9.z
+	mad r13, r9.wwww, lcol[2], r13
+.end
+
+; texgen for one unit: source row from (r0 position, r2 normal, r12 tex0, r11 tex1), z fixed up,
+; through xf[row..row+2], projective divide by weight, SRTG by weight (r15 = colour). Result in r9.
+.proc texgen0
+	mul r7, tgsrc[0].xxxx, r0
+	mad r7, r2, tgsrc[0].yyyy, r7
+	mad r7, r12, tgsrc[0].zzzz, r7
+	mad r7, r11, tgsrc[0].wwww, r7
+	mul r7.z, tgp[0].x, r7.z
+	add r7.z, tgp[0].y, r7.z
+	mov r7.w, k0.y
+	dp3 r8.x, tgsel[0].yzw, inmtx.yzw
+	add r8.x, tgsel[0].x, r8.x
+	mova a0.x, r8.x
+	dp4 r9.x, xf[a0.x+0], r7
+	dp4 r9.y, xf[a0.x+1], r7
+	dp4 r9.z, xf[a0.x+2], r7
+	add r10.x, -k0.y, r9.z
+	mul r10.x, tgp[0].z, r10.x
+	add r10.x, k0.y, r10.x
+	rcp r10.x, r10.x
+	mul r9.xy, r9.xy, r10.x
+	add r10.xy, r15.xy, -r9.xy
+	mul r10.xy, tgp[0].w, r10.xy
+	add outtc0.xy, r9.xy, r10.xy
+.end
+
+.proc texgen1
+	mul r7, tgsrc[1].xxxx, r0
+	mad r7, r2, tgsrc[1].yyyy, r7
+	mad r7, r12, tgsrc[1].zzzz, r7
+	mad r7, r11, tgsrc[1].wwww, r7
+	mul r7.z, tgp[1].x, r7.z
+	add r7.z, tgp[1].y, r7.z
+	mov r7.w, k0.y
+	dp3 r8.x, tgsel[1].yzw, inmtx.yzw
+	add r8.x, tgsel[1].x, r8.x
+	mova a0.x, r8.x
+	dp4 r9.x, xf[a0.x+0], r7
+	dp4 r9.y, xf[a0.x+1], r7
+	dp4 r9.z, xf[a0.x+2], r7
+	add r10.x, -k0.y, r9.z
+	mul r10.x, tgp[1].z, r10.x
+	add r10.x, k0.y, r10.x
+	rcp r10.x, r10.x
+	mul r9.xy, r9.xy, r10.x
+	add r10.xy, r15.xy, -r9.xy
+	mul r10.xy, tgp[1].w, r10.xy
+	add outtc1.xy, r9.xy, r10.xy
+.end
+
+.proc texgen2
+	mul r7, tgsrc[2].xxxx, r0
+	mad r7, r2, tgsrc[2].yyyy, r7
+	mad r7, r12, tgsrc[2].zzzz, r7
+	mad r7, r11, tgsrc[2].wwww, r7
+	mul r7.z, tgp[2].x, r7.z
+	add r7.z, tgp[2].y, r7.z
+	mov r7.w, k0.y
+	dp3 r8.x, tgsel[2].yzw, inmtx.yzw
+	add r8.x, tgsel[2].x, r8.x
+	mova a0.x, r8.x
+	dp4 r9.x, xf[a0.x+0], r7
+	dp4 r9.y, xf[a0.x+1], r7
+	dp4 r9.z, xf[a0.x+2], r7
+	add r10.x, -k0.y, r9.z
+	mul r10.x, tgp[2].z, r10.x
+	add r10.x, k0.y, r10.x
+	rcp r10.x, r10.x
+	mul r9.xy, r9.xy, r10.x
+	add r10.xy, r15.xy, -r9.xy
+	mul r10.xy, tgp[2].w, r10.xy
+	add outtc2.xy, r9.xy, r10.xy
+.end

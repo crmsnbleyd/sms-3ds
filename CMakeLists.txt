@@ -173,12 +173,14 @@ set(SMS_3DS_GX c3d CACHE STRING "GX backend: c3d or null")
 if(SMS_3DS_GX STREQUAL "null")
   set(SMS_GX_BACKEND_SOURCES platform3ds/gx_null_backend.cpp)
 else()
-  set(SMS_GX_BACKEND_SOURCES platform3ds/gx3ds/render.cpp platform3ds/gx3ds/xform.cpp platform3ds/gx3ds/texture.cpp platform3ds/gx3ds/tev.cpp)
+  set(SMS_GX_BACKEND_SOURCES platform3ds/gx3ds/render.cpp platform3ds/gx3ds/vtx.cpp platform3ds/gx3ds/texture.cpp
+    platform3ds/gx3ds/tev.cpp)
   # Built with libctru's short enums (they include <citro3d.h>); they share no enum-typed struct
   # members with the GX front end.
   set_source_files_properties(${SMS_GX_BACKEND_SOURCES} PROPERTIES COMPILE_OPTIONS "-fshort-enums")
   ctr_add_shader_library(gx3ds_passthru platform3ds/gx3ds/passthru.v.pica)
-  dkp_add_embedded_binary_library(gx3ds_shaders gx3ds_passthru)
+  ctr_add_shader_library(gx3ds_gx platform3ds/gx3ds/gx.v.pica)
+  dkp_add_embedded_binary_library(gx3ds_shaders gx3ds_passthru gx3ds_gx)
 endif()
 add_library(sms_gx STATIC ${SMS_GX_FRONT_SOURCES} ${SMS_GX_GD_SOURCES} ${SMS_GX_BACKEND_SOURCES})
 if(TARGET gx3ds_shaders)

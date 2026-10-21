@@ -1,11 +1,13 @@
-// GX renderer on citro3d (Phase 2a: geometry and vertex colour). Fills the renderer seam declared
-// in sms-pc-port's gx_internal.h; the GX front end (gx_api.cpp, gx_fifo.cpp) is unchanged.
+// GX renderer on citro3d. Fills the renderer seam declared in sms-pc-port's gx_internal.h; the GX
+// front end (gx_api.cpp, gx_fifo.cpp) is unchanged.
 //
 // A batch is a run of primitives with unchanged GX state (the front end calls onStateChange before
-// any state write), as in sms-pc-port's gx_render.cpp. flushBatch transforms the batch's packed
-// vertices on the CPU (xform.cpp) into a per-frame ring in linear memory and draws them with u16
-// indices. A display copy (GXCopyDisp) ends the citro3d frame, which shows the render target on the
-// top screen; its clear applies when the next frame begins.
+// any state write), as in sms-pc-port's gx_render.cpp. The front end's vertex loader writes the
+// batch's packed vertices straight into a per-frame ring in linear memory, where the PICA reads
+// them in place: transform, lighting and texgen run in the vertex shader (gx.v.pica, set up by
+// vtx.cpp), the TEV in the texture combiners (tev.cpp). A display copy (GXCopyDisp) ends the
+// citro3d frame, which shows the render target on the top screen; its clear applies when the next
+// frame begins.
 #include "gx3ds.h"
 
 #include <3ds.h>
@@ -15,6 +17,7 @@
 
 #include "gx_internal.h"
 #include "sms3ds.h"
+#include "gx3ds_gx_shbin.h"
 #include "gx3ds_passthru_shbin.h"
 
 namespace gx {
@@ -37,18 +40,22 @@ namespace {
 
 using namespace gx;
 
-// --- the batch being built (packed GX vertices, 32-bit indices) -------------------------------------
-std::vector<uint8_t> s_verts;
+// --- the batch being built: packed GX vertices in the vertex ring, 32-bit indices ---------------------
+uint8_t* s_batch;                   // first vertex of the batch in the ring
+std::vector<uint8_t> s_scratch;     // where the loader writes when the ring is full (not drawn)
 std::vector<uint32_t> s_idx;
 uint32_t s_count, s_fmt, s_stride;
 PrimClass s_class = PRIM_TRIS;
 uint32_t s_tmpIdx[3 * 65536];
+bool s_dropping;  // the current primitive went to the scratch buffer
 
 // --- citro3d ---------------------------------------------------------------------------------------
 bool s_ready;
 C3D_RenderTarget* s_target;
 DVLB_s* s_dvlb;
-shaderProgram_s s_prog;
+shaderProgram_s s_prog;  // side bars (passthru.v.pica)
+DVLB_s* s_gxDvlb;
+shaderProgram_s s_gxProg;  // the GX pipeline (gx.v.pica)
 // Per-frame rings in linear memory (the GPU reads them when the frame is submitted).
 const size_t kVertRing = 6u << 20, kIdxRing = 1u << 20;
 uint8_t* s_vertRing;
@@ -60,7 +67,7 @@ u32 s_clearColor = 0x000000FF, s_clearDepth = 0xFFFFFF;
 uint32_t s_frameBatches, s_frameVerts;
 
 // Per-frame profile (system ticks, 268 MHz), published to the HUD at each display copy.
-u64 s_tFlush, s_tXform, s_tTex, s_tWait, s_lastPresent;
+u64 s_tFlush, s_tXform, s_tTex, s_tWait, s_lastPresent;  // xform: vertex set-up (attributes, uniforms)
 double s_decodeAtPresent;
 inline float ticksMs(u64 t) { return (float)((double)t * 1000.0 / SYSCLOCK_ARM11); }
 
@@ -172,6 +179,14 @@ void drawSideBars()
 	}
 	s_vertUsed += (8 * sizeof(OutVertex) + 15) & ~(size_t)15;
 	s_idxUsed += (12 * sizeof(uint16_t) + 15) & ~(size_t)15;
+	C3D_BindProgram(&s_prog);
+	C3D_AttrInfo* ai = C3D_GetAttrInfo();
+	AttrInfo_Init(ai);
+	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
+	AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 2);
 	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
@@ -191,12 +206,32 @@ void drawSideBars()
 	BufInfo_Init(bi);
 	BufInfo_Add(bi, v, sizeof(OutVertex), 5, 0x43210);
 	C3D_DrawElements(GPU_TRIANGLES, 12, C3D_UNSIGNED_SHORT, ix);
+	// back to the GX program; its uniforms (the passthru program's constant shares them) are resent
+	C3D_BindProgram(&s_gxProg);
+	vtxInvalidate();
 }
 
 void resetBatch()
 {
 	s_count = 0;
+	s_batch = nullptr;
 	s_idx.clear();
+}
+
+// Room for `n` more vertices of `stride` bytes in the current batch, in the ring.
+uint8_t* batchRoom(uint32_t n, uint32_t stride)
+{
+	beginFrame();
+	if (!s_batch)
+		s_batch = s_vertRing + s_vertUsed;
+	const size_t end = (size_t)(s_batch - s_vertRing) + (size_t)(s_count + n) * stride;
+	if (end > kVertRing) {
+		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
+		if (s_scratch.size() < (size_t)n * stride)
+			s_scratch.resize((size_t)n * stride);
+		return nullptr;
+	}
+	return s_batch + (size_t)s_count * stride;
 }
 
 }  // namespace
@@ -210,20 +245,17 @@ void rendererInit(float)
 {
 	if (s_ready)
 		return;
-	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 2);
+	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4);  // uniform uploads per batch (skinned models) take room
 	s_target = C3D_RenderTargetCreate(kScreenH, kScreenW, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
 	C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT, kTransferFlags);
 	s_dvlb = DVLB_ParseFile((u32*)gx3ds_passthru_shbin, gx3ds_passthru_shbin_size);
 	shaderProgramInit(&s_prog);
 	shaderProgramSetVsh(&s_prog, &s_dvlb->DVLE[0]);
-	C3D_BindProgram(&s_prog);
-	C3D_AttrInfo* ai = C3D_GetAttrInfo();
-	AttrInfo_Init(ai);
-	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);          // position
-	AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);  // colour
-	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);          // texcoords, units 0..2
-	AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);
-	AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 2);
+	s_gxDvlb = DVLB_ParseFile((u32*)gx3ds_gx_shbin, gx3ds_gx_shbin_size);
+	shaderProgramInit(&s_gxProg);
+	shaderProgramSetVsh(&s_gxProg, &s_gxDvlb->DVLE[0]);
+	C3D_BindProgram(&s_gxProg);
+	vtxInit(&s_gxProg);
 	s_vertRing = (uint8_t*)linearAlloc(kVertRing);
 	s_idxRing = (uint8_t*)linearAlloc(kIdxRing);
 	s_ready = s_target && s_vertRing && s_idxRing;
@@ -246,10 +278,9 @@ uint8_t* primitiveBegin(uint8_t op, uint32_t n, uint32_t fmt, uint32_t stride)
 	s_class = cls;
 	s_fmt = fmt;
 	s_stride = stride;
-	size_t need = (size_t)(s_count + n) * stride;
-	if (s_verts.size() < need)
-		s_verts.resize(need + (need >> 1));
-	return s_verts.data() + (size_t)s_count * stride;
+	uint8_t* room = batchRoom(n, stride);
+	s_dropping = !room;
+	return room ? room : s_scratch.data();
 }
 
 void primitiveEnd(uint8_t op, uint32_t n)
@@ -258,7 +289,7 @@ void primitiveEnd(uint8_t op, uint32_t n)
 		return;
 	sms3ds_gx_primitives = sms3ds_gx_primitives + 1;
 	sms3ds_gx_vertices = sms3ds_gx_vertices + n;
-	if (s_class != PRIM_TRIS) {  // lines and points: not drawn yet (PICA has triangles only)
+	if (s_class != PRIM_TRIS || s_dropping) {  // lines and points: not drawn yet (triangles only)
 		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
 		return;
 	}
@@ -339,10 +370,10 @@ void appendDecoded(PrimClass cls, uint32_t fmt, uint32_t stride, const uint8_t* 
 	s_class = cls;
 	s_fmt = fmt;
 	s_stride = stride;
-	size_t need = (size_t)(s_count + count) * stride;
-	if (s_verts.size() < need)
-		s_verts.resize(need + (need >> 1));
-	memcpy(s_verts.data() + (size_t)s_count * stride, verts, (size_t)count * stride);
+	uint8_t* room = batchRoom(count, stride);
+	if (!room)
+		return;
+	memcpy(room, verts, (size_t)count * stride);
 	for (uint32_t i = 0; i < nidx; i++)
 		s_idx.push_back(s_count + idx[i]);
 	s_count += count;
@@ -357,40 +388,39 @@ bool batchUsesArena() { return false; }
 
 void flushBatch()
 {
-	if (!s_ready || s_idx.empty() || !s_count) {
+	if (!s_ready || s_idx.empty() || !s_count || !s_batch) {
 		resetBatch();
 		return;
 	}
 	const u64 tStart = svcGetSystemTick();
 	beginFrame();
-	const size_t vbytes = (size_t)s_count * sizeof(OutVertex), ibytes = s_idx.size() * sizeof(uint16_t);
-	if (s_vertUsed + vbytes > kVertRing || s_idxUsed + ibytes > kIdxRing) {
+	const size_t vbytes = (size_t)s_count * s_stride, ibytes = s_idx.size() * sizeof(uint16_t);
+	if (s_idxUsed + ibytes > kIdxRing) {
 		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
 		resetBatch();
 		return;
 	}
+	uint16_t* oi = (uint16_t*)(s_idxRing + s_idxUsed);
+	for (size_t i = 0; i < s_idx.size(); i++)
+		oi[i] = (uint16_t)s_idx[i];
+	s_vertUsed = (size_t)(s_batch - s_vertRing) + ((vbytes + 15) & ~(size_t)15);
+	s_idxUsed += (ibytes + 15) & ~(size_t)15;
+
 	applyState();
 	TevPlan plan;
 	setupTev(plan);
-	OutVertex* ov = (OutVertex*)(s_vertRing + s_vertUsed);
 	const u64 tx0 = svcGetSystemTick();
-	transform(s_verts.data(), s_count, s_fmt, s_stride, plan.coord, plan.units, ov);
+	const bool ok = vtxSetup(plan, s_fmt, s_stride, s_batch);
 	const u64 tx1 = svcGetSystemTick();
 	for (int u = 0; u < plan.units; u++)
 		C3D_TexBind(u, textureForMap(plan.map[u]));
 	const u64 tx2 = svcGetSystemTick();
 	s_tXform += tx1 - tx0;
 	s_tTex += tx2 - tx1;
-	uint16_t* oi = (uint16_t*)(s_idxRing + s_idxUsed);
-	for (size_t i = 0; i < s_idx.size(); i++)
-		oi[i] = (uint16_t)s_idx[i];
-	s_vertUsed += (vbytes + 15) & ~(size_t)15;
-	s_idxUsed += (ibytes + 15) & ~(size_t)15;
-
-	C3D_BufInfo* bi = C3D_GetBufInfo();
-	BufInfo_Init(bi);
-	BufInfo_Add(bi, ov, sizeof(OutVertex), 5, 0x43210);
-	C3D_DrawElements(GPU_TRIANGLES, (int)s_idx.size(), C3D_UNSIGNED_SHORT, oi);
+	if (ok)
+		C3D_DrawElements(GPU_TRIANGLES, (int)s_idx.size(), C3D_UNSIGNED_SHORT, oi);
+	else
+		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
 	s_frameBatches++;
 	s_frameVerts += s_count;
 	resetBatch();
@@ -406,6 +436,9 @@ void executeCopy(uint32_t ctrl)
 		sms3ds_gx_frames = sms3ds_gx_frames + 1;
 		if (s_inFrame) {
 			drawSideBars();
+			// the CPU wrote this frame's vertices and indices through the data cache
+			GSPGPU_FlushDataCache(s_vertRing, s_vertUsed);
+			GSPGPU_FlushDataCache(s_idxRing, s_idxUsed);
 			C3D_FrameEnd(0);
 			s_inFrame = false;
 			sms3ds_gx_cpu_ms = C3D_GetProcessingTime();

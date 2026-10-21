@@ -25,11 +25,12 @@ struct TevPlan {
 };
 void setupTev(TevPlan& plan);
 
-// xform.cpp: transforms and lights `count` packed GX vertices of format `fmt` (gx_fifo.cpp's
-// vtxFmtLayout) with the current XF state, as sms-pc-port's vertex shader does (gx_shader.cpp genVS).
-// coords[u] (u < ncoords) is the GX texture coordinate (0..7) whose texgen fills OutVertex::tc[u].
-void transform(const uint8_t* verts, uint32_t count, uint32_t fmt, uint32_t stride, const int* coords, int ncoords,
-               OutVertex* out);
+// vtx.cpp: the GPU vertex pipeline (gx.v.pica). vtxSetup points the PICA at a batch of packed GX
+// vertices of format `fmt` (gx_fifo.cpp's vtxFmtLayout) at `base` in linear memory and sets the
+// uniforms from the current XF state for the texture units in `plan`; false: cannot be drawn.
+void vtxInit(shaderProgram_s* prog);
+void vtxInvalidate();  // another program changed the vertex uniforms
+bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* base);
 
 // texture.cpp: GX texture map `map` (0..7) as a PICA texture with its wrap/filter state, or white.
 C3D_Tex* textureForMap(int map);
