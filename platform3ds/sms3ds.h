@@ -26,6 +26,18 @@ void sms3ds_hud_init(void);
 void sms3ds_hud_start(void);
 void sms3ds_hud_fatal(const char* msg);  // shows msg and waits for the user to quit
 
+// hid_3ds.cpp: 3DS input in a form pad_3ds.cpp (built with the game's types) can use.
+enum {
+	SMS3DS_A = 1 << 0, SMS3DS_B = 1 << 1, SMS3DS_X = 1 << 2, SMS3DS_Y = 1 << 3,
+	SMS3DS_L = 1 << 4, SMS3DS_R = 1 << 5, SMS3DS_Z = 1 << 6, SMS3DS_START = 1 << 7,
+	SMS3DS_UP = 1 << 8, SMS3DS_DOWN = 1 << 9, SMS3DS_LEFT = 1 << 10, SMS3DS_RIGHT = 1 << 11,
+};
+typedef struct {
+	uint32_t keys;  // SMS3DS_* bits
+	int16_t stickX, stickY, cstickX, cstickY;  // raw circle pad / C-stick
+} Sms3dsHid;
+void sms3ds_hid_read(Sms3dsHid* out);
+
 // Counters the null GX backend advances (read by the HUD).
 extern volatile uint32_t sms3ds_gx_frames;      // display copies (GXCopyDisp)
 extern volatile uint32_t sms3ds_gx_copies;      // texture copies

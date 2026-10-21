@@ -60,6 +60,10 @@ void drawBottom()
 	put("\x1b[10;1Happ mem free %6lu KiB  ", (unsigned long)(osGetMemRegionFree(MEMREGION_APPLICATION) >> 10));
 	put("\x1b[11;1Hheap %lu KiB, linear %lu KiB", (unsigned long)(envGetHeapSize() >> 10),
 	    (unsigned long)(envGetLinearHeapSize() >> 10));
+	put("\x1b[22;1Hcontrols (no picture yet):");
+	put("\x1b[23;1H A B X Y START d-pad: same");
+	put("\x1b[24;1H L/R: L/R  ZL/ZR: Z");
+	put("\x1b[25;1H circle pad: stick  C-stick: C");
 	put("\x1b[28;1HSTART+SELECT: quit");
 }
 

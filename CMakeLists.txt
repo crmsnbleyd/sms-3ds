@@ -215,7 +215,9 @@ add_executable(sms_3ds
   platform3ds/log_3ds.cpp
   platform3ds/port_host_3ds.cpp
   platform3ds/stubs_3ds.cpp
-  platform3ds/thread_3ds.cpp)
+  platform3ds/thread_3ds.cpp
+  platform3ds/hid_3ds.cpp
+  platform3ds/pad_3ds.cpp)
 target_include_directories(sms_3ds PRIVATE
   ${CMAKE_SOURCE_DIR}/platform3ds
   ${SMS_PORT_PATCHED_INCLUDE_DIRS} ${SMS_PORT_ORIG_INCLUDE_DIRS}
@@ -226,7 +228,7 @@ target_compile_options(sms_3ds PRIVATE -fno-strict-aliasing -Wno-unused-paramete
 # These include <3ds.h> and share structs with libctru, which is built with short enums.
 set(SMS_3DS_SHORT_ENUM_SOURCES
   platform3ds/main_3ds.cpp platform3ds/hud.cpp platform3ds/log_3ds.cpp
-  platform3ds/port_host_3ds.cpp platform3ds/thread_3ds.cpp)
+  platform3ds/port_host_3ds.cpp platform3ds/thread_3ds.cpp platform3ds/hid_3ds.cpp)
 set_source_files_properties(${SMS_3DS_SHORT_ENUM_SOURCES} PROPERTIES COMPILE_OPTIONS "-fshort-enums")
 set_source_files_properties(${SMS_PC_PORT_DIR}/platform/misc/msl_math.c ${SMS_PC_PORT_DIR}/platform/mtx/mtx.cpp
   PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")

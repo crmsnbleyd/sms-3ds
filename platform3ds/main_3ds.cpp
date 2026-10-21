@@ -63,8 +63,11 @@ int main(int argc, char** argv)
 
 	char* args[] = {argc > 0 ? argv[0] : (char*)"sms-3ds", NULL};
 	port_init(1, args);
-	// MEM1 is a heap block, not at 0x80000000: GX physical addresses are offsets into it.
-	GXPC_SetMemoryWindow(port_mem1_base, (uint32_t)port_mem1_size);
+	// MEM1 is a heap block, not at 0x80000000. Game code turns pointers into GX "physical"
+	// addresses with the SDK macro OSCachedToPhysical (p - 0x80000000), which the front end masks
+	// to 30 bits: every 3DS user address is below 0x40000000, so a window based at 0 makes both
+	// directions the identity (gx_fifo's write stamps measure from MEM1: patches/port/3ds-05).
+	GXPC_SetMemoryWindow(NULL, 0x40000000u);
 	fprintf(stderr, "[3ds] MEM1 %lu KiB at %p\n", port_mem1_size >> 10, (void*)port_mem1_base);
 	fprintf(stderr, "[port] entering SMS_main\n");
 	SMS_main();
