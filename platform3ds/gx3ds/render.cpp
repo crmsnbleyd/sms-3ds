@@ -258,6 +258,7 @@ struct CopyTex {
 	// moved into `lin` by the GPU at the end of the copy, and encoded into `dest` next frame
 	uint8_t* lin = nullptr;
 	bool pending = false;
+	uint64_t storedHash = 0;  // of the tiles last encoded into `dest` (unchanged: not encoded again)
 	const void* dest = nullptr;
 	uint32_t layout = 0, tw = 0, th = 0;
 };
@@ -344,6 +345,7 @@ void copyToTexture(uint32_t ctrl)
 		c.rt = nullptr;
 		c.lin = nullptr;
 		c.pending = false;
+		c.storedHash = 0;
 	}
 	if (!c.rt) {
 		if (!C3D_TexInitVRAM(&c.tex, (u16)pw, (u16)ph, GPU_RGBA8)) {
@@ -510,20 +512,36 @@ void copyToTexture(uint32_t ctrl)
 	}
 }
 
-// One texel (r, g, b, a) of a write-back, in the GX layout `layout` (gx_texture.cpp copyLayout).
+std::vector<uint32_t> s_wbRgba;  // a write-back's copy texture untiled: GX row order, 0xAABBGGRR
+
+// A write-back (the copy texture's tiles in c.lin) encoded into `out` in the GX layout c.layout
+// (gx_texture.cpp copyLayout), resampled from the copy texture's size to the copy's.
 void encodeCopy(const CopyTex& c, uint8_t* out)
 {
 	const uint32_t L = c.layout, w = c.tw, h = c.th, pw = c.tex.width, ph = c.tex.height;
 	static const uint8_t kTw[7] = {8, 8, 8, 4, 4, 4, 4}, kTh[7] = {8, 4, 4, 4, 4, 4, 4};
 	const uint32_t tileW = kTw[L], tileH = kTh[L], cols = (w + tileW - 1) / tileW, rows = (h + tileH - 1) / tileH;
+	// untile once: row y of the GX image is memory row ph - 1 - y; tiles hold 8x8 in Morton order
+	s_wbRgba.resize((size_t)pw * ph);
+	const uint32_t* src = (const uint32_t*)c.lin;
+	for (uint32_t y = 0; y < ph; y++) {
+		const uint32_t my = ph - 1 - y, rowBase = (my >> 3) * (pw >> 3) * 64;
+		uint32_t* dst = &s_wbRgba[(size_t)y * pw];
+		for (uint32_t x = 0; x < pw; x++) {
+			const uint32_t m = (x & 1) | (my & 1) << 1 | (x & 2) << 1 | (my & 2) << 2 | (x & 4) << 2 | (my & 4) << 3;
+			const uint32_t v = src[rowBase + (x >> 3) * 64 + m];  // bytes A, B, G, R
+			dst[x] = __builtin_bswap32(v);                        // -> R, G, B, A in memory order
+		}
+	}
+	std::vector<uint32_t> colOf(w);
+	for (uint32_t x = 0; x < w; x++)
+		colOf[x] = x * pw / w;
 	auto texel = [&](uint32_t x, uint32_t y, uint8_t* t) {  // r, g, b, a of GX texel (x, y)
 		if (x >= w || y >= h) {
 			memset(t, 0, 4);
 			return;
 		}
-		const uint32_t sx = x * pw / w, sy = y * ph / h;
-		const uint8_t* d = c.lin + 4 * mortonOffset(sx, ph - 1 - sy, pw);  // stored A, B, G, R
-		t[0] = d[3], t[1] = d[2], t[2] = d[1], t[3] = d[0];
+		memcpy(t, &s_wbRgba[(size_t)(y * ph / h) * pw + colOf[x]], 4);
 	};
 	auto n4 = [](uint8_t v) { return (uint32_t)(v * 15 + 127) / 255; };
 	uint8_t* p = out;
@@ -601,6 +619,10 @@ void storeWriteBacks()
 			continue;
 		c.pending = false;
 		GSPGPU_InvalidateDataCache(c.lin, c.tex.size);
+		const uint64_t h = hashBytes(c.lin, c.tex.size);
+		if (h == c.storedHash)
+			continue;  // the same picture as last time: RAM already holds it
+		c.storedHash = h;
 		encodeCopy(c, (uint8_t*)const_cast<void*>(c.dest));
 	}
 }
@@ -1139,6 +1161,12 @@ void traceNoteProjection(const float*) {}
 }  // namespace gx
 
 extern "C" {
+void GXPC_MemoryWritten(const void* p, uint32_t size);  // gx_fifo.cpp: stamps the pages written
+
+// The game's data-cache flushes (DCFlushRange, DCStoreRange: platform/os/os_core.cpp) say the CPU
+// rewrote memory: its pages are stamped, so cached textures and EFB copies there are re-checked.
+void GXPC_InvalidateRange(const void* p, uint32_t size) { GXPC_MemoryWritten(p, size); }
+
 int GXPC_InitAuto(float efbScale)
 {
 	gx::rendererInit(efbScale);
