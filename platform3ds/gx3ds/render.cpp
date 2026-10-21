@@ -115,6 +115,27 @@ void readClearValues()
 	s_clearDepth = g.bp[BP_CLEAR_Z] & 0xFFFFFF;
 }
 
+void drawClipRects(const float (*r)[4], int n, const uint8_t rgba[4], float z, bool depth);
+
+// A copy's clear (BP 0x4F-0x51) over the copied rectangle only: the whole target when it covers the
+// EFB, else a quad with the clear colour and depth (citro3d clears whole targets).
+void clearCopyRect()
+{
+	const uint32_t tl = g.bp[BP_COPY_SRC_TL], wh = g.bp[BP_COPY_SRC_WH];
+	const float x0 = float(tl & 0x3FF), y0 = float((tl >> 10) & 0x3FF);
+	const float w = float((wh & 0x3FF) + 1), h = float(((wh >> 10) & 0x3FF) + 1);
+	if (x0 <= 0 && y0 <= 0 && w >= 640 && h >= 448) {
+		C3D_RenderTargetClear(s_target, C3D_CLEAR_ALL, s_clearColor, s_clearDepth);
+		return;
+	}
+	// EFB (ex, ey) is clip (1 - ey / 240, 0.8 - ex / 400), as vtx.cpp setFinal maps it
+	const float lb = 1.0f - 2.0f * kLetterbox / kScreenW;
+	const float r[1][4] = {{1.0f - (y0 + h) / 240.0f, 1.0f - y0 / 240.0f, lb - (x0 + w) / 400.0f, lb - x0 / 400.0f}};
+	const uint8_t rgba[4] = {uint8_t(s_clearColor >> 24), uint8_t(s_clearColor >> 16), uint8_t(s_clearColor >> 8),
+	                         uint8_t(s_clearColor)};
+	drawClipRects(r, 1, rgba, -float(s_clearDepth) / 16777215.0f, true);
+}
+
 // Per-fragment state from the BP registers (as gx_render.cpp applyGlState).
 void applyState()
 {
@@ -174,7 +195,7 @@ void applyState()
 
 // Solid rectangles in PICA clip space ({x0, x1, y0, y1}; x along the screen's height, y along its
 // width), drawn over everything with the pass-through program.
-void drawClipRects(const float (*r)[4], int n, const uint8_t rgba[4])
+void drawClipRects(const float (*r)[4], int n, const uint8_t rgba[4], float z = -0.5f, bool depth = false)
 {
 	if (s_vertUsed + 4 * n * sizeof(OutVertex) > kVertRing || s_idxUsed + 6 * n * sizeof(uint16_t) > kIdxRing)
 		return;
@@ -185,7 +206,7 @@ void drawClipRects(const float (*r)[4], int n, const uint8_t rgba[4])
 			OutVertex& o = v[q * 4 + c];
 			o.pos[0] = r[q][c & 1];
 			o.pos[1] = r[q][2 + (c >> 1)];
-			o.pos[2] = -0.5f;
+			o.pos[2] = z;
 			o.pos[3] = 1.0f;
 			memcpy(o.clr, rgba, 4);
 			memset(o.tc, 0, sizeof o.tc);
@@ -204,7 +225,7 @@ void drawClipRects(const float (*r)[4], int n, const uint8_t rgba[4])
 	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
 	AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);
 	AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 2);
-	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	C3D_DepthTest(depth, GPU_ALWAYS, depth ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
 	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
 	C3D_CullFace(GPU_CULL_NONE);
@@ -259,6 +280,8 @@ struct CopyTex {
 	uint8_t* lin = nullptr;
 	bool pending = false;
 	uint64_t storedHash = 0;  // of the tiles last encoded into `dest` (unchanged: not encoded again)
+	uint64_t ramHash = 0;     // of `dest` after the last write-back (ramKnown)
+	bool ramKnown = false;
 	const void* dest = nullptr;
 	uint32_t layout = 0, tw = 0, th = 0;
 };
@@ -346,6 +369,7 @@ void copyToTexture(uint32_t ctrl)
 		c.lin = nullptr;
 		c.pending = false;
 		c.storedHash = 0;
+		c.ramKnown = false;
 	}
 	if (!c.rt) {
 		if (!C3D_TexInitVRAM(&c.tex, (u16)pw, (u16)ph, GPU_RGBA8)) {
@@ -618,12 +642,22 @@ void storeWriteBacks()
 		if (!c.pending)
 			continue;
 		c.pending = false;
+		// the CPU changed RAM there after the copy (stamped and different from what was stored): on
+		// the GameCube its edit lands after the copy, so it wins, and RAM becomes the texture again
+		if (c.ramKnown && !unwrittenSince(c.dest, c.bytes, c.clock) && hashBytes(c.dest, c.bytes) != c.ramHash) {
+			c.current = false;
+			c.ramKnown = false;
+			continue;
+		}
 		GSPGPU_InvalidateDataCache(c.lin, c.tex.size);
 		const uint64_t h = hashBytes(c.lin, c.tex.size);
-		if (h == c.storedHash)
-			continue;  // the same picture as last time: RAM already holds it
-		c.storedHash = h;
-		encodeCopy(c, (uint8_t*)const_cast<void*>(c.dest));
+		if (h != c.storedHash || !c.ramKnown) {
+			c.storedHash = h;
+			encodeCopy(c, (uint8_t*)const_cast<void*>(c.dest));
+		}
+		c.ramHash = hashBytes(c.dest, c.bytes);
+		c.ramKnown = true;
+		c.clock = writeClock();
 	}
 }
 
@@ -865,8 +899,14 @@ C3D_Tex* copyTexture(const void* ptr)
 	if (it == s_copies.end())
 		return nullptr;
 	CopyTex& c = it->second;
-	if (c.current && !unwrittenSince(ptr, c.bytes, c.clock))
-		c.current = false;  // the CPU wrote there since: RAM is the texture (kept for the next copy)
+	if (c.current && !unwrittenSince(ptr, c.bytes, c.clock)) {
+		// pages there were flushed since; stamps are per page, so neighbours' flushes count too:
+		// when RAM still holds exactly what was written back, the copy stays the texture
+		if (c.ramKnown && hashBytes(ptr, c.bytes) == c.ramHash)
+			c.clock = writeClock();
+		else
+			c.current = false;  // the CPU wrote there: RAM is the texture (kept for the next copy)
+	}
 	return c.current ? &c.tex : nullptr;
 }
 
@@ -1141,7 +1181,7 @@ void executeCopy(uint32_t ctrl)
 		copyToTexture(ctrl);
 		if (clear) {
 			readClearValues();
-			C3D_RenderTargetClear(s_target, C3D_CLEAR_ALL, s_clearColor, s_clearDepth);
+			clearCopyRect();
 			s_efbDirty = true;
 		}
 	}
