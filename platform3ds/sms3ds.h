@@ -38,6 +38,12 @@ typedef struct {
 } Sms3dsHid;
 void sms3ds_hid_read(Sms3dsHid* out);
 
+// presence_3ds.cpp: the game's state as of the last frame (-1 before the first).
+extern volatile int sms3ds_state, sms3ds_area, sms3ds_episode, sms3ds_save_file;
+// pad_3ds.cpp: how often the game read the controller, and the buttons it saw last.
+extern volatile uint32_t sms3ds_pad_reads;
+extern volatile uint16_t sms3ds_pad_buttons;
+
 // Counters the null GX backend advances (read by the HUD).
 extern volatile uint32_t sms3ds_gx_frames;      // display copies (GXCopyDisp)
 extern volatile uint32_t sms3ds_gx_copies;      // texture copies

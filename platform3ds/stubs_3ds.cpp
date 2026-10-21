@@ -58,5 +58,4 @@ void port_savestate_hint(PortSaveStateHint* out)
 // --- HD movies, presence, window icon -----------------------------------------------------------------
 BOOL port_draw_hd_thp(u8*, u8*, u8*, s16, s16, s16, s16, s16, s16) { return FALSE; }
 const char* port_hd_cutscene_directory(void) { return NULL; }
-void port_presence_frame(const PortPresence*) {}
 void port_window_icon_init(void) {}

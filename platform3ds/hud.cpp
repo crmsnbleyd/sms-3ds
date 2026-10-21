@@ -60,6 +60,9 @@ void drawBottom()
 	put("\x1b[10;1Happ mem free %6lu KiB  ", (unsigned long)(osGetMemRegionFree(MEMREGION_APPLICATION) >> 10));
 	put("\x1b[11;1Hheap %lu KiB, linear %lu KiB", (unsigned long)(envGetHeapSize() >> 10),
 	    (unsigned long)(envGetLinearHeapSize() >> 10));
+	put("\x1b[13;1Hgame state %-3d area %-3d episode %-3d  ", sms3ds_state, sms3ds_area, sms3ds_episode);
+	put("\x1b[14;1Hsave file  %-3d", sms3ds_save_file);
+	put("\x1b[15;1Hpad reads  %10lu  buttons %04x", (unsigned long)sms3ds_pad_reads, (unsigned)sms3ds_pad_buttons);
 	put("\x1b[22;1Hcontrols (no picture yet):");
 	put("\x1b[23;1H A B X Y START d-pad: same");
 	put("\x1b[24;1H L/R: L/R  ZL/ZR: Z");

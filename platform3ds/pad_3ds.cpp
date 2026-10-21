@@ -9,6 +9,21 @@
 
 extern "C" __attribute__((weak)) void port_ext_pad_read(void* status);  // ext/ hooks (port_ext.h)
 
+volatile uint32_t sms3ds_pad_reads;
+volatile uint16_t sms3ds_pad_buttons;
+
+// The SDK's controller set-up calls succeed (the weak stubs would return 0, and the game's pad
+// layer treats a failed reset as no controller). As sms-pc-port's platform/pad/pad.cpp.
+extern "C" BOOL PADInit() { return TRUE; }
+extern "C" BOOL PADReset(u32) { return TRUE; }
+extern "C" BOOL PADRecalibrate(u32) { return TRUE; }
+extern "C" BOOL PADSync(void) { return TRUE; }
+extern "C" void PADSetSpec(u32) {}
+extern "C" void PADSetAnalogMode(u32) {}
+extern "C" void PADSetSamplingRate(u32) {}
+extern "C" void PADControlMotor(s32, u32) {}
+extern "C" void PADControlAllMotors(const u32*) {}
+
 namespace {
 
 // The circle pad reports about +-156 at its rim, the C-stick about +-146; GameCube sticks report
@@ -52,6 +67,8 @@ extern "C" u32 PADRead(PADStatus* status)
 		s.triggerRight = 255;
 	}
 	s.button = b;
+	sms3ds_pad_reads = sms3ds_pad_reads + 1;
+	sms3ds_pad_buttons = b;
 	s.analogA = (b & PAD_BUTTON_A) ? 255 : 0;
 	s.analogB = (b & PAD_BUTTON_B) ? 255 : 0;
 	s.stickX = stick(h.stickX, 156);

@@ -217,7 +217,8 @@ add_executable(sms_3ds
   platform3ds/stubs_3ds.cpp
   platform3ds/thread_3ds.cpp
   platform3ds/hid_3ds.cpp
-  platform3ds/pad_3ds.cpp)
+  platform3ds/pad_3ds.cpp
+  platform3ds/presence_3ds.cpp)
 target_include_directories(sms_3ds PRIVATE
   ${CMAKE_SOURCE_DIR}/platform3ds
   ${SMS_PORT_PATCHED_INCLUDE_DIRS} ${SMS_PORT_ORIG_INCLUDE_DIRS}
