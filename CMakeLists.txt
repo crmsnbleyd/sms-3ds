@@ -231,3 +231,7 @@ ctr_generate_smdh(${CMAKE_BINARY_DIR}/sms_3ds.smdh
   DESCRIPTION "Super Mario Sunshine port (Phase 1: headless)"
   AUTHOR "sms-3ds")
 ctr_create_3dsx(sms_3ds SMDH ${CMAKE_BINARY_DIR}/sms_3ds.smdh)
+# The 3DSX loader rejects relocations that point outside the image (e.g. &x + 0x80000000).
+add_custom_command(TARGET sms_3ds_3dsx POST_BUILD
+  COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/scripts/check-3dsx.py ${CMAKE_BINARY_DIR}/sms_3ds.3dsx
+  COMMENT "Checking 3DSX relocations")

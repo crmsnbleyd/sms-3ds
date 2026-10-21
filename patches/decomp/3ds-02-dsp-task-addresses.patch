@@ -1,0 +1,23 @@
+--- a/libs/JSystem/src/dsptask.c
++++ b/libs/JSystem/src/dsptask.c
+@@ -654,10 +654,20 @@
+ {
+ 	DspInitWork();
+ 	audio_task.priority          = 0xf0;
++#ifdef __3DS__
++	// OSPhysicalToCached(&x) folds to &x + 0x80000000, a relocation the 3DSX format cannot hold
++	// (the loader rejects it). The DSP HLE never reads these addresses: plain pointers.
++	audio_task.iram_mmem_addr    = (u16*)&jdsp;
++#else
+ 	audio_task.iram_mmem_addr    = (u16*)OSPhysicalToCached(&jdsp);
++#endif
+ 	audio_task.iram_length       = sizeof(jdsp);
+ 	audio_task.iram_addr         = 0;
++#ifdef __3DS__
++	audio_task.dram_mmem_addr    = (u16*)AUDIO_YIELD_BUFFER;
++#else
+ 	audio_task.dram_mmem_addr    = (u16*)OSPhysicalToCached(AUDIO_YIELD_BUFFER);
++#endif
+ 	audio_task.dram_length       = sizeof(AUDIO_YIELD_BUFFER);
+ 	audio_task.dram_addr         = 0;
+ 	audio_task.dsp_init_vector   = 0;
