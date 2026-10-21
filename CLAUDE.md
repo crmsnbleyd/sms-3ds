@@ -8,8 +8,8 @@ This is a personal project. Organisation-wide engineering conventions that may b
 
 ## Status
 
-**Phase 0 (done 2026-10-21):** toolchain installed and verified, reference repos cloned, PC baseline built, recon written.
-No port code exists yet. See `local/ENVIRONMENT.md` (gitignored: versions, commits, machine quirks) and `docs/PORT-MAP.md` (how the PC port is built).
+**Phase 0 done; Phase 1 (headless boot) built, awaiting its first Azahar run.** Roadmap and Phase 1 design: `docs/PHASES.md`.
+See also `local/ENVIRONMENT.md` (gitignored: versions, commits, machine quirks) and `docs/PORT-MAP.md` (how the PC port is built).
 
 ## Approach and decisions
 
@@ -50,8 +50,18 @@ No port code exists yet. See `local/ENVIRONMENT.md` (gitignored: versions, commi
 
 ```
 CLAUDE.md               this file
+NOTICE                  MIT notice for code adapted from sms-pc-port
+CMakeLists.txt          3DS build: game + PC platform layer from refs/, our patches, platform3ds/
+cmake/patches.cmake     copy-then-patch at configure time (refs/ is never written)
+patches/decomp/         our decomp patches, applied after sms-pc-port's decomp-patches/
+patches/port/           our patches to sms-pc-port's own files (platform/, src/)
+platform3ds/            3DS layer: main_3ds, log_3ds, hud, gx_null_backend (Phase 1), stubs_3ds, port_host_3ds, thread_3ds
+docs/PHASES.md          roadmap and current phase design
 docs/PORT-MAP.md        facts about sms-pc-port: platform modules, patches, 32/64-bit, GX renderer
 scripts/check-env.sh    environment + hygiene check (read-only, idempotent)
+scripts/build-3ds.sh    configure + build build-3ds/sms_3ds.3dsx
+scripts/make-patch.sh   edit work/ copies of refs files, then diff them into patches/
+work/                   gitignored; make-patch.sh working copies
 local/                  gitignored; machine-specific notes
   ENVIRONMENT.md        tool versions, repo commits, license notes, machine quirks, PC baseline commands
   check-env.local       optional; extra settings sourced by check-env.sh
@@ -59,6 +69,7 @@ refs/                   gitignored, read-only reference clones
   sms-pc-port/          chasem-dev/sms-pc-port @ e3cdcca, decomp/ @ 967436b
 rom/                    gitignored; the user's disc image (CISO)
 build-pc/               gitignored; PC baseline build (macos-arm64/)
+build-3ds/              gitignored; 3DS build (sms_3ds.3dsx, .elf, .map, patched/ and port-patched/ copies)
 ```
 
 ## Check the environment
@@ -69,6 +80,17 @@ scripts/check-env.sh --no-rom   # skip the disc-image check
 ```
 
 Exit 0 means no FAIL. Expected versions and commits live at the top of the script and in `local/ENVIRONMENT.md`; update both together.
+
+## Build and run (3DS)
+
+```sh
+scripts/build-3ds.sh             # -> build-3ds/sms_3ds.3dsx
+```
+
+On the SD card (Azahar: its `sdmc` folder): the disc image at `3ds/sms-3ds/game.ciso`; the game writes
+`3ds/sms-3ds/log.txt` and saves under `3ds/sms-3ds/card-a/`. Never change refs/: change behaviour with a patch
+(`scripts/make-patch.sh edit port|decomp <path>`, edit `work/...`, then `scripts/make-patch.sh diff port|decomp <name> <path>...`).
+Use `#ifdef __3DS__` in patches so they read as 3DS branches of the PC code.
 
 ## Build references
 

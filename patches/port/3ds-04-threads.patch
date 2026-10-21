@@ -1,0 +1,48 @@
+--- a/platform/os/os_thread.cpp
++++ b/platform/os/os_thread.cpp
+@@ -226,7 +226,13 @@
+ // last two spins ran out (it waits for a message a frame away, not for an
+ // answer) goes straight to sleep, trying a spin again every 16th switch:
+ // spinning there only burns power, which a handheld's GPU shares.
++#ifdef __3DS__
++// Horizon does not time-slice threads of equal priority on a core: a spinning thread keeps the
++// thread it waits for from running. Go straight to the condition variable.
++const u64 kSpinNs = 0;
++#else
+ const u64 kSpinNs = 100000;
++#endif
+ 
+ // True if the turn came while spinning.
+ bool spin_for_turn(OSThread* self)
+@@ -267,6 +273,11 @@
+ #else
+ 		pthread_attr_setstack(&a, ls->base, kLowStackSize);
+ #endif
++#elif defined(__3DS__)
++		// The game's own stacks are 16-64 KiB; 256 KiB leaves room for host code, and the 3DS heap
++		// is small (MEM1 and ARAM come out of it too).
++		pthread_attr_setstacksize(&a, 256 << 10);
++		pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+ #else
+ 		pthread_attr_setstacksize(&a, 1 << 20);
+ 		pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+--- a/platform/vi/vi.cpp
++++ b/platform/vi/vi.cpp
+@@ -131,8 +131,17 @@
+ // The debug overlay's speed multiplier (sms_gx; absent in builds without it).
+ extern "C" int GXPC_GetSpeed(void) __attribute__((weak));
+ 
++#ifdef __3DS__
++extern "C" void sms3ds_thread_raise_priority(int steps);  // platform3ds/thread_3ds.cpp
++#endif
++
+ void* timer_thread(void*)
+ {
++#ifdef __3DS__
++	// Above the game's threads, so retraces arrive on time while a game thread computes
++	// (Horizon threads run until they block or a higher-priority thread wakes).
++	sms3ds_thread_raise_priority(4);
++#endif
+ 	// SMS_VI_HZ=<rate> overrides the actual retrace rate (benchmarking).
+ 	long period_ns = 16683350 / g_retrace_multiplier; // 59.94 or 119.88 Hz
+ 	if (const char* hz = getenv("SMS_VI_HZ"))

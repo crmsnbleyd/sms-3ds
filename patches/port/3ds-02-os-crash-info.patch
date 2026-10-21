@@ -1,0 +1,46 @@
+--- a/platform/os/crash_info.cpp
++++ b/platform/os/crash_info.cpp
+@@ -10,6 +10,9 @@
+ #include <windows.h>
+ #include <io.h>
+ #include <stdio.h>
++#elif defined(__3DS__)
++#include <dlfcn.h>
++#include <unistd.h>
+ #else
+ #include <dlfcn.h>
+ #include <unistd.h>
+@@ -94,6 +97,10 @@
+ 	vm_size_t copied = 0;
+ 	return vm_read_overwrite(mach_task_self(), (vm_address_t)from, size, (vm_address_t)to, &copied) == KERN_SUCCESS &&
+ 	       copied == size;
++#elif defined(__3DS__)
++	// No checked read of arbitrary addresses: report nothing rather than fault again.
++	(void)to; (void)from; (void)size;
++	return false;
+ #else
+ 	// The kernel checks the source and fails with EFAULT instead of faulting.
+ 	struct iovec local = {to, size}, remote = {(void*)from, size};
+@@ -196,6 +203,9 @@
+ 	append(g_system, sizeof g_system, " processors");
+ 	GetModuleFileNameA(NULL, g_executable, sizeof g_executable);
+ 	g_executable[sizeof g_executable - 1] = 0;
++#elif defined(__3DS__)
++	append(g_system, sizeof g_system, "Horizon (Nintendo 3DS)");
++	append(g_executable, sizeof g_executable, "sms-3ds.3dsx");
+ #else
+ 	struct utsname name;
+ 	if (uname(&name) == 0) {
+--- a/platform/os/os_core.cpp
++++ b/platform/os/os_core.cpp
+@@ -39,6 +39,10 @@
+ #ifdef _WIN32
+ 	localtime_s(&lt, &now);
+ 	s64 local = (s64)_mkgmtime(&lt) - 946684800LL;
++#elif defined(__3DS__)
++	// The 3DS clock is kept in local time: time() already counts local seconds.
++	(void)lt;
++	s64 local = (s64)now - 946684800LL;
+ #else
+ 	localtime_r(&now, &lt);
+ 	s64 local = (s64)now + lt.tm_gmtoff - 946684800LL;

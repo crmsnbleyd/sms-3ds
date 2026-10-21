@@ -1,0 +1,33 @@
+--- a/libs/JSystem/src/JKernel/JKRHeap.cpp
++++ b/libs/JSystem/src/JKernel/JKRHeap.cpp
+@@ -60,7 +60,14 @@
+ 	void* arenaStart = OSInitAlloc(arenaLo, arenaHi, numHeaps);
+ 	arenaHi          = (u8*)OSRoundDown32B(arenaHi);
+ 	arenaLo          = (u8*)OSRoundUp32B(arenaStart);
++#ifdef __3DS__
++	// MEM1 is an ordinary heap block on 3DS (no 0x80000000 mapping): its base comes from the
++	// platform layer. Its +0x28 word (boot info's memory size) reads 0, as on the PC build.
++	extern u8* port_mem1_base;
++	u8* start        = port_mem1_base;
++#else
+ 	u8* start        = (u8*)OSPhysicalToCached(0);
++#endif
+ 	mCodeEnd         = (u8*)arenaLo;
+ 	mCodeStart       = (u8*)start;
+ 	mUserRamStart    = (u8*)arenaLo;
+--- a/src/System/DrawSyncManager.cpp
++++ b/src/System/DrawSyncManager.cpp
+@@ -93,7 +93,13 @@
+ 	for (;;) {
+ 		void* msg;
+ 		OSReceiveMessage(&self->mMessageQueue, &msg, 1);
++#ifdef __3DS__
++		// Messages are draw-sync tokens (u16), 0x10000 (stop), or a FIFO write pointer; host
++		// pointers on 3DS lie below 0x80000000, so anything above 0x10000 is a pointer.
++		if ((size_t)msg > 0x10000) {
++#else
+ 		if ((size_t)msg >= 0x80000000) {
++#endif
+ 			self->mFifo->push(msg);
+ 
+ 			u32 iVar1 = self->mFifo->size();

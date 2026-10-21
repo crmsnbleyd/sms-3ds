@@ -1,0 +1,73 @@
+--- a/src/port_include/dlfcn.h
++++ b/src/port_include/dlfcn.h
+@@ -15,6 +15,23 @@
+ 	HMODULE module = handle ? (HMODULE)handle : GetModuleHandleA("SDL2.dll");
+ 	return module ? (void*)GetProcAddress(module, name) : NULL;
+ }
++#elif defined(__3DS__)
++/* 3DS: no dynamic loader. Nothing is ever found; crash symbolisation reports raw addresses. */
++#include <stddef.h>
++#define RTLD_NOW 0
++#define RTLD_GLOBAL 0
++#define RTLD_LAZY 0
++#define RTLD_DEFAULT ((void*)0)
++typedef struct {
++	const char* dli_fname;
++	void* dli_fbase;
++	const char* dli_sname;
++	void* dli_saddr;
++} Dl_info;
++static inline void* dlopen(const char*, int) { return NULL; }
++static inline void* dlsym(void*, const char*) { return NULL; }
++static inline int dladdr(const void*, Dl_info*) { return 0; }
++static inline const char* dlerror(void) { return "no dynamic loader on 3DS"; }
+ #else
+ #include_next <dlfcn.h>
+ #endif
+--- a/src/port_include/execinfo.h
++++ b/src/port_include/execinfo.h
+@@ -43,6 +43,11 @@
+ 	}
+ 	return out;
+ }
++#elif defined(__3DS__)
++/* 3DS: no unwinder in the runtime; crash reports come from the emulator or Luma3DS instead. */
++static inline int backtrace(void**, int) { return 0; }
++static inline void backtrace_symbols_fd(void* const*, int, int) {}
++static inline char** backtrace_symbols(void* const*, int) { return 0; }
+ #else
+ #include_next <execinfo.h>
+ #endif
+--- a/src/port_host.h
++++ b/src/port_host.h
+@@ -15,6 +15,11 @@
+ #include <sys/stat.h>
+ #include <time.h>
+ #include <errno.h>
++#ifdef __3DS__
++/* newlib on 3DS declares pread but no library defines it: lseek + read under a lock
++   (platform3ds/port_host_3ds.cpp). */
++ssize_t port_pread(int fd, void* buffer, size_t count, unsigned long long offset);
++#else
+ static inline ssize_t port_pread(int fd, void* buffer, size_t count, unsigned long long offset)
+ {
+ #ifdef __linux__
+@@ -23,6 +28,7 @@
+ 	return pread(fd, buffer, count, (off_t)offset);
+ #endif
+ }
++#endif
+ static inline int port_setenv(const char* name, const char* value, int overwrite)
+ {
+ 	return setenv(name, value, overwrite);
+@@ -33,8 +39,8 @@
+ }
+ static inline void port_sleep_until(const struct timespec* deadline)
+ {
+-#ifdef __APPLE__
+-	// macOS has no clock_nanosleep; sleep the remaining monotonic interval.
++#if defined(__APPLE__) || defined(__3DS__)
++	// macOS (and newlib on 3DS) has no clock_nanosleep; sleep the remaining monotonic interval.
+ 	struct timespec now, rem;
+ 	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+ 		return;

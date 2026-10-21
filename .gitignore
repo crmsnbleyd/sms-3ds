@@ -25,3 +25,6 @@ build*/
 
 # Machine-specific notes (environment, network/security quirks) — never commit
 local/
+
+# Working copies for scripts/make-patch.sh
+work/

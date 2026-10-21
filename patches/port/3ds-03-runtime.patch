@@ -1,0 +1,91 @@
+--- a/platform/port_runtime.cpp
++++ b/platform/port_runtime.cpp
+@@ -20,6 +20,12 @@
+ #ifdef _WIN32
+ #include <windows.h>
+ #include <io.h>
++#elif defined(__3DS__)
++#include <unistd.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <dlfcn.h>
++#include <malloc.h>
+ #else
+ #include <sys/mman.h>
+ #include <unistd.h>
+@@ -143,7 +149,7 @@
+ // atos on macOS) so a crash report names functions and source lines without
+ // the exact binary at hand. Not async-signal-safe: it runs last, after the
+ // rest of the report is written.
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__3DS__)
+ static void crash_symbolise(void** bt, int n)
+ {
+ 	char exe[512];
+@@ -350,6 +356,8 @@
+ 	signal(sig, SIG_DFL);
+ 	raise(sig);
+ }
++#elif defined(__3DS__)
++// 3DS: no POSIX signals for faults; Azahar's log and Luma3DS's exception screen report crashes.
+ #else
+ static void crash_handler(int sig, siginfo_t* si, void* uc)
+ {
+@@ -447,7 +455,7 @@
+ 
+ void port_crash_thread_init()
+ {
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__3DS__)
+ 	// A separate stack allows the first diagnostic to survive stack exhaustion.
+ 	alignas(16) static thread_local unsigned char crash_stack[64 * 1024];
+ 	stack_t stack = {};
+@@ -466,6 +474,8 @@
+ 	// Native hardware exceptions keep their Windows status. Translating them
+ 	// through a CRT signal handler would replace it with a generic abort code.
+ 	signal(SIGABRT, crash_handler);
++#elif defined(__3DS__)
++	// nothing to install (see crash_handler)
+ #else
+ 	// The first backtrace() loads the unwinder, which allocates: do it now.
+ 	void* warm[1];
+@@ -485,7 +495,7 @@
+ u8* port_mem1_base;
+ u32 port_mem1_size;
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__3DS__)
+ // mmap exactly at `want` without replacing an existing mapping. Linux has
+ // MAP_FIXED_NOREPLACE; Darwin's MAP_FIXED silently replaces whatever is there
+ // (dylibs, graphics driver memory: the low 4 GiB is shared with the system
+@@ -579,6 +589,17 @@
+ 			VirtualFree(p, 0, MEM_RELEASE);
+ 		exit(1);
+ 	}
++#elif defined(__3DS__)
++	// No mmap and no address choice on 3DS (user space ends below 0x40000000): MEM1 is a zeroed
++	// heap block. OSPhysicalToCached/OSCachedToPhysical go through port_mem1_base; the decomp's
++	// raw 0x80000000-range reads are patched (patches/decomp/).
++	(void)want;
++	void* p = memalign(0x1000, port_mem1_size);
++	if (!p) {
++		port_log("[port] out of memory for MEM1 (%u MiB)\n", mb);
++		exit(1);
++	}
++	memset(p, 0, port_mem1_size);
+ #else
+ 	void* p = map_exact(want, port_mem1_size);
+ #if PORT_GAME_HI
+@@ -756,6 +777,12 @@
+ 	void* want = (void*)(uintptr_t)0xCC000000u;
+ #ifdef _WIN32
+ 	void* p = VirtualAlloc(want, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
++#elif defined(__3DS__)
++	// The GX front end redirects the write-gather pipe (platform/gx/port_include/GXVert.h); there
++	// is no 0xCC000000 to map on 3DS.
++	void* p = want;
++	port_log("[port] GX WG pipe writes go through the GX front end\n");
++	return;
+ #else
+ 	void* p = map_exact(want, 0x10000);
+ #endif
