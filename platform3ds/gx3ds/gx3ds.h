@@ -4,6 +4,7 @@
 #ifndef SMS_GX3DS_H
 #define SMS_GX3DS_H
 
+#include <citro3d.h>
 #include <stdint.h>
 
 namespace gx3ds {
@@ -18,7 +19,11 @@ static_assert(sizeof(OutVertex) == 28, "PICA vertex layout");
 
 // xform.cpp: transforms and lights `count` packed GX vertices of format `fmt` (gx_fifo.cpp's
 // vtxFmtLayout) with the current XF state, as sms-pc-port's vertex shader does (gx_shader.cpp genVS).
-void transform(const uint8_t* verts, uint32_t count, uint32_t fmt, uint32_t stride, OutVertex* out);
+// `texcoord` selects the GX texture coordinate (0..7) whose texgen fills OutVertex::tc, or -1.
+void transform(const uint8_t* verts, uint32_t count, uint32_t fmt, uint32_t stride, int texcoord, OutVertex* out);
+
+// texture.cpp: GX texture map `map` (0..7) as a PICA texture with its wrap/filter state, or white.
+C3D_Tex* textureForMap(int map);
 
 // The GameCube picture (640 x 480 of the 640 x 528 EFB) is shown 4:3, letterboxed in the 400 x 240
 // top screen: EFB pixels are halved and offset by 40 screen columns.

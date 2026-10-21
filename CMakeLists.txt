@@ -173,7 +173,7 @@ set(SMS_3DS_GX c3d CACHE STRING "GX backend: c3d or null")
 if(SMS_3DS_GX STREQUAL "null")
   set(SMS_GX_BACKEND_SOURCES platform3ds/gx_null_backend.cpp)
 else()
-  set(SMS_GX_BACKEND_SOURCES platform3ds/gx3ds/render.cpp platform3ds/gx3ds/xform.cpp)
+  set(SMS_GX_BACKEND_SOURCES platform3ds/gx3ds/render.cpp platform3ds/gx3ds/xform.cpp platform3ds/gx3ds/texture.cpp)
   # Built with libctru's short enums (they include <citro3d.h>); they share no enum-typed struct
   # members with the GX front end.
   set_source_files_properties(${SMS_GX_BACKEND_SOURCES} PROPERTIES COMPILE_OPTIONS "-fshort-enums")

@@ -115,7 +115,7 @@ void litChannel(uint32_t ctrl, const float vtxClr[4], const float amb[4], const 
 
 }  // namespace
 
-void transform(const uint8_t* verts, uint32_t count, uint32_t fmt, uint32_t stride, OutVertex* out)
+void transform(const uint8_t* verts, uint32_t count, uint32_t fmt, uint32_t stride, int texcoord, OutVertex* out)
 {
 	using namespace gx;
 	const VtxFmtLayout& lay = vtxFmtLayout(fmt);
@@ -146,8 +146,24 @@ void transform(const uint8_t* verts, uint32_t count, uint32_t fmt, uint32_t stri
 				loadLight(l, lights[l]);
 	}
 
-	// default matrix indices when the vertices carry none (XF 0x1018/0x1019)
-	const uint32_t defPos = g.xfReg[XFR_MATIDX_A] & 63;
+	// default matrix indices when the vertices carry none (XF 0x1018/0x1019): position, then tex0..7
+	const uint32_t matA = g.xfReg[XFR_MATIDX_A], matB = g.xfReg[XFR_MATIDX_B];
+	const uint32_t defPos = matA & 63;
+	const uint32_t defTex[8] = {(matA >> 6) & 63,  (matA >> 12) & 63, (matA >> 18) & 63, (matA >> 24) & 63,
+	                            matB & 63,         (matB >> 6) & 63,  (matB >> 12) & 63, (matB >> 18) & 63};
+
+	// texgen for the requested texture coordinate (as genVS): type 0 matrix, 2/3 colour (SRTG)
+	const uint32_t numTexGens = g.xfReg[XFR_NUMTEXGENS] & 15;
+	const bool genTc = texcoord >= 0;
+	uint32_t tg = 0, tgType = 0, tgRow = 0, tgProj = 0, tgForm = 0;
+	const bool useGen = genTc && (uint32_t)texcoord < numTexGens;
+	if (useGen) {
+		tg = g.xfReg[XFR_TEXGEN + texcoord];
+		tgProj = (tg >> 1) & 1;
+		tgForm = (tg >> 2) & 1;
+		tgType = (tg >> 4) & 7;
+		tgRow = (tg >> 7) & 31;
+	}
 
 	for (uint32_t v = 0; v < count; v++) {
 		const uint8_t* src = verts + v * stride;
@@ -214,8 +230,43 @@ void transform(const uint8_t* verts, uint32_t count, uint32_t fmt, uint32_t stri
 			o.clr[i] = (uint8_t)(clamp01(col[i]) * 255.0f + 0.5f);
 
 		o.tc[0] = o.tc[1] = 0.0f;
-		if (fmt & VF_TEX0)
-			memcpy(o.tc, src + lay.tex[0], 8);
+		if (genTc && !useGen) {  // no texgen for it: the raw coordinate
+			if (fmt & (VF_TEX0 << texcoord))
+				memcpy(o.tc, src + lay.tex[texcoord], 8);
+		} else if (useGen) {
+			if (tgType == 2 || tgType == 3) {  // SRTG: colour channel 0/1's red and green
+				o.tc[0] = col[0];
+				o.tc[1] = col[1];
+			} else {  // matrix: source row through the per-coordinate texture matrix
+				float sv[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+				if (tgRow == 0)
+					memcpy(sv, pos, 12);
+				else if (tgRow == 1 && (fmt & VF_NRM))
+					memcpy(sv, src + lay.nrm, 12);
+				else if (tgRow == 2) {
+					for (int i = 0; i < 4; i++)
+						sv[i] = vc[i];
+				} else if (tgRow >= 5 && (fmt & (VF_TEX0 << ((tgRow - 5) & 7))))
+					memcpy(sv, src + lay.tex[(tgRow - 5) & 7], 8);
+				if (tgForm == 0) {  // AB11
+					sv[2] = 1.0f;
+					sv[3] = 1.0f;
+				}
+				const uint32_t ti = (fmt & VF_MTX) ? src[lay.mtx + 1 + texcoord] : defTex[texcoord];
+				const uint32_t tw = ti * 4;
+				float t[3];
+				for (int r = 0; r < 3; r++)
+					t[r] = xmem(tw + 4 * r) * sv[0] + xmem(tw + 4 * r + 1) * sv[1] + xmem(tw + 4 * r + 2) * sv[2] +
+					       xmem(tw + 4 * r + 3) * sv[3];
+				if (tgProj && t[2] != 0.0f) {  // 3x4: projective (divided here; Phase 2d uses texcoord0w)
+					o.tc[0] = t[0] / t[2];
+					o.tc[1] = t[1] / t[2];
+				} else {
+					o.tc[0] = t[0];
+					o.tc[1] = t[1];
+				}
+			}
+		}
 	}
 }
 

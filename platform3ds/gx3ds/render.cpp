@@ -84,7 +84,7 @@ void readClearValues()
 }
 
 // Per-fragment state from the BP registers (as gx_render.cpp applyGlState).
-void applyState()
+void applyState(C3D_Tex* tex)
 {
 	static const GPU_TESTFUNC kCmp[8] = {GPU_NEVER, GPU_LESS, GPU_EQUAL, GPU_LEQUAL,
 	                                     GPU_GREATER, GPU_NOTEQUAL, GPU_GEQUAL, GPU_ALWAYS};
@@ -132,11 +132,62 @@ void applyState()
 	C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, kLetterbox, kScreenH, kScreenW - kLetterbox);
 	C3D_AlphaTest(false, GPU_ALWAYS, 0);
 
-	// TEV: Phase 2a shows the rasterised colour only.
+	// TEV, Phase 2b: texture times the rasterised colour (the full TEV comes in 2c).
+	C3D_TexEnv* env = C3D_GetTexEnv(0);
+	C3D_TexEnvInit(env);
+	if (tex) {
+		C3D_TexBind(0, tex);
+		C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+	} else {
+		C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+		C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+	}
+}
+
+// The game clears the whole render target (citro3d has no partial clear), so the 4:3 picture's side
+// bars are painted black at the end of each frame.
+void drawSideBars()
+{
+	if (s_vertUsed + 8 * sizeof(OutVertex) > kVertRing || s_idxUsed + 12 * sizeof(uint16_t) > kIdxRing)
+		return;
+	OutVertex* v = (OutVertex*)(s_vertRing + s_vertUsed);
+	uint16_t* ix = (uint16_t*)(s_idxRing + s_idxUsed);
+	// screen-space rectangles (x from -1 left to 1 right, y from 1 top to -1 bottom), tilted as xform.cpp
+	const float edge = 2.0f * kLetterbox / kScreenW;
+	const float rects[2][2] = {{-1.0f, -1.0f + edge}, {1.0f - edge, 1.0f}};
+	for (int r = 0; r < 2; r++) {
+		const float xs[2] = {rects[r][0], rects[r][1]}, ys[2] = {1.0f, -1.0f};
+		for (int c = 0; c < 4; c++) {
+			OutVertex& o = v[r * 4 + c];
+			const float sx = xs[c & 1], sy = ys[c >> 1];
+			o.pos[0] = sy;
+			o.pos[1] = -sx;
+			o.pos[2] = -0.5f;
+			o.pos[3] = 1.0f;
+			memset(o.clr, 0, 3);
+			o.clr[3] = 255;
+			o.tc[0] = o.tc[1] = 0.0f;
+		}
+		const uint16_t q[6] = {0, 1, 2, 1, 3, 2};
+		for (int i = 0; i < 6; i++)
+			ix[r * 6 + i] = (uint16_t)(r * 4 + q[i]);
+	}
+	s_vertUsed += (8 * sizeof(OutVertex) + 15) & ~(size_t)15;
+	s_idxUsed += (12 * sizeof(uint16_t) + 15) & ~(size_t)15;
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 	C3D_TexEnv* env = C3D_GetTexEnv(0);
 	C3D_TexEnvInit(env);
 	C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 	C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+	C3D_BufInfo* bi = C3D_GetBufInfo();
+	BufInfo_Init(bi);
+	BufInfo_Add(bi, v, sizeof(OutVertex), 3, 0x210);
+	C3D_DrawElements(GPU_TRIANGLES, 12, C3D_UNSIGNED_SHORT, ix);
 }
 
 void resetBatch()
@@ -312,15 +363,25 @@ void flushBatch()
 		resetBatch();
 		return;
 	}
+	// Phase 2b: the first TEV stage that samples a texture gives the map and coordinate.
+	const uint32_t nst = ((g.bp[BP_GENMODE] >> 10) & 15) + 1;
+	int texMap = -1, texCoord = -1;
+	for (uint32_t s = 0; s < nst && texMap < 0; s++) {
+		const uint32_t ord = (g.bp[BP_TREF + (s >> 1)] >> ((s & 1) * 12)) & 0x3FF;
+		if ((ord >> 6) & 1) {
+			texMap = ord & 7;
+			texCoord = (ord >> 3) & 7;
+		}
+	}
 	OutVertex* ov = (OutVertex*)(s_vertRing + s_vertUsed);
-	transform(s_verts.data(), s_count, s_fmt, s_stride, ov);
+	transform(s_verts.data(), s_count, s_fmt, s_stride, texCoord, ov);
 	uint16_t* oi = (uint16_t*)(s_idxRing + s_idxUsed);
 	for (size_t i = 0; i < s_idx.size(); i++)
 		oi[i] = (uint16_t)s_idx[i];
 	s_vertUsed += (vbytes + 15) & ~(size_t)15;
 	s_idxUsed += (ibytes + 15) & ~(size_t)15;
 
-	applyState();
+	applyState(texMap >= 0 ? textureForMap(texMap) : nullptr);
 	C3D_BufInfo* bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
 	BufInfo_Add(bi, ov, sizeof(OutVertex), 3, 0x210);
@@ -338,6 +399,7 @@ void executeCopy(uint32_t ctrl)
 		g_displayFrames++;
 		sms3ds_gx_frames = sms3ds_gx_frames + 1;
 		if (s_inFrame) {
+			drawSideBars();
 			C3D_FrameEnd(0);
 			s_inFrame = false;
 			sms3ds_gx_cpu_ms = C3D_GetProcessingTime();
