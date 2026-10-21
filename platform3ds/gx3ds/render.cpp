@@ -80,7 +80,9 @@ void beginFrame()
 	if (s_inFrame)
 		return;
 	const u64 t0 = svcGetSystemTick();
-	C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+	// No C3D_FRAME_SYNCDRAW: that also waits for the next vblank, and the game already paces itself
+	// on its own retrace timer (vi.cpp). Waits only while the GPU still draws the previous frame.
+	C3D_FrameBegin(0);
 	s_tWait += svcGetSystemTick() - t0;
 	C3D_FrameDrawOn(s_target);
 	s_vertUsed = s_idxUsed = 0;

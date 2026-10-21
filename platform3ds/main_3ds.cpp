@@ -48,6 +48,17 @@ int main(int argc, char** argv)
 	fprintf(stderr, "[3ds] FPSCR %08lx (flush-to-zero %s, default NaN %s)\n", (unsigned long)fpscr,
 	        (fpscr >> 24) & 1 ? "on" : "off", (fpscr >> 25) & 1 ? "on" : "off");
 	sms3ds_hud_start();
+	{
+		// Effective CPU clock: 30M iterations of a 3-instruction loop (subs, bne + nop: ~3 cycles
+		// each on the ARM11) against the 268 MHz system tick. ~804 means the New 3DS clock is in
+		// effect; ~268 means the emulator (or the system) runs the old clock.
+		const u64 t0 = svcGetSystemTick();
+		u32 n = 30000000;
+		__asm__ volatile("1: nop\n subs %0, %0, #1\n bne 1b" : "+r"(n) : : "cc");
+		const u64 dt = svcGetSystemTick() - t0;
+		fprintf(stderr, "[3ds] CPU: about %lu MHz (3-cycle loop timed against the 268 MHz tick)\n",
+		        (unsigned long)(90000000ull * (u64)SYSCLOCK_ARM11 / (dt ? dt : 1) / 1000000ull));
+	}
 
 	// Phase 1: no picture, sound or input yet; skip what would only wait on them.
 	setDefault("SMS_NO_AUDIO", "1");
