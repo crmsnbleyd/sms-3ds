@@ -1,0 +1,12 @@
+--- a/platform/card/card.cpp
++++ b/platform/card/card.cpp
+@@ -140,7 +140,8 @@
+ 		port_log("[card] could not write %s\n", path.c_str());
+ 		return false;
+ 	}
+-#ifdef _WIN32
++#if defined(_WIN32) || defined(__3DS__)
++	// Windows' rename and the 3DS SD archive's do not replace an existing file.
+ 	remove(path.c_str());
+ #endif
+ 	if (rename(tmp.c_str(), path.c_str()) != 0) {

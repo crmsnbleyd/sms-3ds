@@ -30,6 +30,20 @@
    buffers (~920k unmapped reads; Azahar ran at 7%). Cause: ARM short enums. Fixed by building with `-fno-short-enums`.
    Also seen: `/AudioRes/Seqs/JaiArcS.hed` not found, followed by null reads in MSound/JAIBasic (check after the fix).
 
+3. Enum fix confirmed: parser in sync, full speed, 468 frames. GX display lists and vertex arrays were then read
+   ~128 MiB past MEM1 (the window base was added on top of OSCachedToPhysical's result). Fixed: identity window
+   (patches/port/3ds-05). Minimal PADRead added.
+4. With the GDB stub (Azahar, port 24689; `arm-none-eabi-gdb build-3ds/sms_3ds.elf`, `target remote :24689`):
+   title passed with START; file select reached (area 15, TCardLoad progress 0x13). The file select is the 3D
+   save blocks Mario jumps into, so the choice was made from GDB (`gpCardLoad->unkB0 = 0`, then `unk10 = 3` to
+   confirm "start"). **The Delfino Airstrip (area 0) loaded and ran** (frames and primitive counts rising, main
+   thread in per-frame lighting/TEV set-up). **M1 met.**
+5. Open: ~920k unmapped reads per run from the seagull sound (TAnimalBase::perform -> MSRandPlay::startSeRandPlay):
+   the static MSRandPlay list's links are corrupted by small u16-sized increments (e.g. 0x0838b294 -> 0x083bb294),
+   so the walk reads through null and 0x8044xxxx pointers. Next: a GDB watchpoint on the first list link
+   (0x838b294, deterministic) from boot to catch the writer. May also exist on the PC with SMS_NO_AUDIO, where
+   such pointers land inside MEM1 at 0x80000000.
+
 ## Phase 1 open risks (checked on the first runs)
 
 - FPSCR: **confirmed** — Horizon starts threads with FPSCR `0x03000000` (flush-to-zero and default-NaN on), unlike the
