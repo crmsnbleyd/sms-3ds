@@ -458,6 +458,31 @@ FILE* s_dump;
 std::unordered_set<uint64_t> s_dumpSeen;
 uint32_t s_dumpBatches;
 
+// A dump is taken 10 s (300 display frames) after entering each area, once per area, on L+R+X, or
+// when the file sdmc:/3ds/sms-3ds/dump exists (checked every second; removed when taken).
+bool dumpDue()
+{
+	static int lastArea = -1, lastState = -1;
+	static uint32_t since;
+	static uint64_t dumpedAreas;
+	if (sms3ds_area != lastArea || sms3ds_state != lastState) {
+		lastArea = sms3ds_area;
+		lastState = sms3ds_state;
+		since = 0;
+	}
+	since++;
+	if (sms3ds_gx_dump_request)
+		return true;
+	if (since == 300 && sms3ds_state == 5 && sms3ds_area >= 0 && sms3ds_area < 64 &&
+	    !(dumpedAreas & (1ull << sms3ds_area))) {
+		dumpedAreas |= 1ull << sms3ds_area;
+		return true;
+	}
+	if (g_displayFrames % 30 == 0 && remove("sdmc:/3ds/sms-3ds/dump") == 0)
+		return true;
+	return false;
+}
+
 void dumpBatch(const TevPlan& plan, uint32_t why)
 {
 	s_dumpBatches++;
@@ -846,10 +871,12 @@ void executeCopy(uint32_t ctrl)
 			s_dump = nullptr;
 			fprintf(stderr, "[gx3ds] frame dump: %lu batches, %lu distinct, in frame-dump.txt\n",
 			        (unsigned long)s_dumpBatches, (unsigned long)s_dumpSeen.size());
-		} else if (sms3ds_gx_dump_request) {
+		} else if (dumpDue()) {
 			sms3ds_gx_dump_request = 0;
-			s_dump = fopen("sdmc:/3ds/sms-3ds/frame-dump.txt", "w");
-			fprintf(stderr, "[gx3ds] frame dump requested%s\n", s_dump ? "" : ": cannot open frame-dump.txt");
+			char name[64];
+			snprintf(name, sizeof name, "sdmc:/3ds/sms-3ds/frame-dump-area%d.txt", sms3ds_area);
+			s_dump = fopen(name, "w");
+			fprintf(stderr, "[gx3ds] frame dump of area %d%s\n", sms3ds_area, s_dump ? "" : ": cannot open the file");
 			s_dumpSeen.clear();
 			s_dumpBatches = 0;
 			if (s_dump)
