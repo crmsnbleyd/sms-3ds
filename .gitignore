@@ -1,0 +1,27 @@
+# Reference clones (read-only, never vendored)
+refs/
+
+# Disc images and anything extracted/converted from them — never commit
+rom/
+*.iso
+*.gcm
+*.ciso
+*.gcz
+*.rvz
+*.wbfs
+*.nkit.*
+
+# Build output and 3DS binaries — never commit
+build*/
+*.3dsx
+*.cia
+*.3ds
+*.cci
+*.elf
+*.smdh
+
+# macOS
+.DS_Store
+
+# Machine-specific notes (environment, network/security quirks) — never commit
+local/
