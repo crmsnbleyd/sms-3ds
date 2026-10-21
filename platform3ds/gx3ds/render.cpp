@@ -170,36 +170,30 @@ void applyState()
 	C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, kLetterbox, kScreenH, kScreenW - kLetterbox);
 }
 
-// The game clears the whole render target (citro3d has no partial clear), so the 4:3 picture's side
-// bars are painted black at the end of each frame.
-void drawSideBars()
+// Solid rectangles in PICA clip space ({x0, x1, y0, y1}; x along the screen's height, y along its
+// width), drawn over everything with the pass-through program.
+void drawClipRects(const float (*r)[4], int n, const uint8_t rgba[4])
 {
-	if (s_vertUsed + 8 * sizeof(OutVertex) > kVertRing || s_idxUsed + 12 * sizeof(uint16_t) > kIdxRing)
+	if (s_vertUsed + 4 * n * sizeof(OutVertex) > kVertRing || s_idxUsed + 6 * n * sizeof(uint16_t) > kIdxRing)
 		return;
 	OutVertex* v = (OutVertex*)(s_vertRing + s_vertUsed);
 	uint16_t* ix = (uint16_t*)(s_idxRing + s_idxUsed);
-	// screen-space rectangles (x from -1 left to 1 right, y from 1 top to -1 bottom), tilted as xform.cpp
-	const float edge = 2.0f * kLetterbox / kScreenW;
-	const float rects[2][2] = {{-1.0f, -1.0f + edge}, {1.0f - edge, 1.0f}};
-	for (int r = 0; r < 2; r++) {
-		const float xs[2] = {rects[r][0], rects[r][1]}, ys[2] = {1.0f, -1.0f};
+	for (int q = 0; q < n; q++) {
 		for (int c = 0; c < 4; c++) {
-			OutVertex& o = v[r * 4 + c];
-			const float sx = xs[c & 1], sy = ys[c >> 1];
-			o.pos[0] = sy;
-			o.pos[1] = -sx;
+			OutVertex& o = v[q * 4 + c];
+			o.pos[0] = r[q][c & 1];
+			o.pos[1] = r[q][2 + (c >> 1)];
 			o.pos[2] = -0.5f;
 			o.pos[3] = 1.0f;
-			memset(o.clr, 0, 3);
-			o.clr[3] = 255;
+			memcpy(o.clr, rgba, 4);
 			memset(o.tc, 0, sizeof o.tc);
 		}
-		const uint16_t q[6] = {0, 1, 2, 1, 3, 2};
+		const uint16_t k[6] = {0, 1, 2, 1, 3, 2};
 		for (int i = 0; i < 6; i++)
-			ix[r * 6 + i] = (uint16_t)(r * 4 + q[i]);
+			ix[q * 6 + i] = (uint16_t)(q * 4 + k[i]);
 	}
-	s_vertUsed += (8 * sizeof(OutVertex) + 15) & ~(size_t)15;
-	s_idxUsed += (12 * sizeof(uint16_t) + 15) & ~(size_t)15;
+	s_vertUsed += (4 * n * sizeof(OutVertex) + 15) & ~(size_t)15;
+	s_idxUsed += (6 * n * sizeof(uint16_t) + 15) & ~(size_t)15;
 	C3D_BindProgram(&s_prog);
 	C3D_AttrInfo* ai = C3D_GetAttrInfo();
 	AttrInfo_Init(ai);
@@ -226,11 +220,21 @@ void drawSideBars()
 	C3D_BufInfo* bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
 	BufInfo_Add(bi, v, sizeof(OutVertex), 5, 0x43210);
-	C3D_DrawElements(GPU_TRIANGLES, 12, C3D_UNSIGNED_SHORT, ix);
+	C3D_DrawElements(GPU_TRIANGLES, 6 * n, C3D_UNSIGNED_SHORT, ix);
 	// back to the GX program; its uniforms (the passthru program's constant shares them) are resent
 	C3D_BindProgram(&s_gxProg);
 	vtxInvalidate();
 	s_lastPixelValid = false;
+}
+
+// The game clears the whole render target (citro3d has no partial clear), so the 4:3 picture's side
+// bars are painted black at the end of each frame.
+void drawSideBars()
+{
+	const float e = 2.0f * kLetterbox / kScreenW;
+	const float bars[2][4] = {{-1.0f, 1.0f, 1.0f - e, 1.0f}, {-1.0f, 1.0f, -1.0f, -1.0f + e}};
+	const uint8_t black[4] = {0, 0, 0, 255};
+	drawClipRects(bars, 2, black);
 }
 
 // --- EFB texture copies (GXCopyTex) ---------------------------------------------------------------
@@ -253,6 +257,7 @@ std::unordered_map<const void*, CopyTex> s_copies;
 std::vector<CopyTex> s_retired;  // replaced while a frame in flight may still sample them
 C3D_Tex s_efbTex;
 bool s_efbTexOk;
+bool s_copyFlipS, s_copyFlipT;  // measured at start-up (calibrateCopies)
 
 // Copy textures not copied to for two seconds (their buffers were freed: a new area allocates new
 // ones) are released when VRAM runs low; render targets can only be deleted between frames.
@@ -378,7 +383,11 @@ void copyToTexture(uint32_t ctrl)
 	uint16_t* ix = (uint16_t*)(s_idxRing + s_idxUsed);
 	for (int i = 0; i < 4; i++) {
 		const float X = (i & 1) ? 1.0f : -1.0f, Y = (i & 2) ? 1.0f : -1.0f;
-		const float sx = (X + 1.0f) * 0.5f, ty = (Y + 1.0f) * 0.5f;  // the copy's (s, t) there
+		float sx = (X + 1.0f) * 0.5f, ty = (Y + 1.0f) * 0.5f;  // the copy's (s, t) there
+		if (s_copyFlipS)
+			sx = 1.0f - sx;
+		if (s_copyFlipT)
+			ty = 1.0f - ty;
 		const float ex = x0 + sx * w, ey = y0 + ty * h;
 		const float wx = kScreenH - ey * 0.5f, wy = (kScreenW - kLetterbox) - ex * 0.5f;
 		OutVertex& o = v[i];
@@ -459,6 +468,65 @@ void copyToTexture(uint32_t ctrl)
 	C3D_BindProgram(&s_gxProg);
 	vtxInvalidate();
 	s_lastPixelValid = false;
+}
+
+// Where a copied texel lands is measured rather than trusted: a red quad over the EFB's top-left
+// quadrant goes through copyToTexture, and the copy texture is read back to see which quadrant
+// came out red. A copy whose red is elsewhere sets s_copyFlipS / s_copyFlipT.
+uint32_t mortonOffset(uint32_t x, uint32_t y, uint32_t w)
+{
+	uint32_t m = 0;
+	for (int b = 0; b < 3; b++)
+		m |= ((x >> b) & 1) << (2 * b) | ((y >> b) & 1) << (2 * b + 1);
+	return (((y >> 3) * (w >> 3) + (x >> 3)) << 6) + m;
+}
+
+void calibrateCopies()
+{
+	static uint8_t probe[64];
+	const uint32_t saved[3] = {g.bp[BP_COPY_SRC_TL], g.bp[BP_COPY_SRC_WH], g.bp[BP_PE_CONTROL]};
+	void* savedDest = g.copyDest;
+	beginFrame();  // clears to black
+	const float quad[1][4] = {{0.0f, 1.0f, 0.0f, 1.0f - 2.0f * kLetterbox / kScreenW}};  // EFB x < 320, y < 240
+	const uint8_t red[4] = {255, 0, 0, 255};
+	drawClipRects(quad, 1, red);
+	s_efbDirty = true;
+	g.bp[BP_COPY_SRC_TL] = 0;
+	g.bp[BP_COPY_SRC_WH] = 639u | 479u << 10;
+	g.bp[BP_PE_CONTROL] = 0;
+	g.copyDest = probe;
+	copyToTexture(6u << 4);  // RGBA8
+	C3D_FrameEnd(0);
+	s_inFrame = false;
+	C3D_FrameBegin(0);  // waits for the GPU
+	C3D_FrameEnd(0);
+	auto it = s_copies.find(probe);
+	int found = -1;
+	if (it != s_copies.end()) {
+		C3D_Tex& t = it->second.tex;
+		GSPGPU_InvalidateDataCache(t.data, t.size);
+		const uint32_t pw = t.width, ph = t.height;
+		for (int q = 0; q < 4; q++) {  // GX quadrant q: (s, t) = (0.25 or 0.75, 0.25 or 0.75)
+			const uint32_t x = (q & 1) ? pw * 3 / 4 : pw / 4, y = (q & 2) ? ph * 3 / 4 : ph / 4;
+			const uint8_t* d = (const uint8_t*)t.data + 4 * mortonOffset(x, ph - 1 - y, pw);
+			if (d[3] > 128 && d[2] < 64 && d[1] < 64)  // RGBA8 is stored A, B, G, R
+				found = found < 0 ? q : 4;
+		}
+		s_retired.push_back(it->second);
+		s_copies.erase(it);
+	}
+	if (found >= 0 && found < 4) {
+		s_copyFlipS = found & 1;
+		s_copyFlipT = (found & 2) != 0;
+	}
+	fprintf(stderr, "[gx3ds] copy orientation: red quadrant %d%s, flip s %d t %d\n", found,
+	        found < 0 || found > 3 ? " (not measured: copies keep the computed orientation)" : "", s_copyFlipS,
+	        s_copyFlipT);
+	g.bp[BP_COPY_SRC_TL] = saved[0];
+	g.bp[BP_COPY_SRC_WH] = saved[1];
+	g.bp[BP_PE_CONTROL] = saved[2];
+	g.copyDest = savedDest;
+	s_clearPending = true;
 }
 
 // --- frame dump (hold L+R+X): the GX state of each distinct batch of one frame -------------------------
@@ -663,6 +731,8 @@ void rendererInit(float)
 	s_idxRing = (uint8_t*)linearAlloc(kIdxRing);
 	s_efbTexOk = C3D_TexInitVRAM(&s_efbTex, 256, 512, GPU_RGBA8);
 	s_ready = s_target && s_vertRing && s_idxRing;
+	if (s_ready && s_efbTexOk)
+		calibrateCopies();
 	fprintf(stderr, "[gx3ds] citro3d %s: 400x240 RGBA8 target, %u KiB vertex ring, linear free %lu KiB, vram free %lu KiB\n",
 	        s_ready ? "ready" : "FAILED", (unsigned)(kVertRing >> 10), (unsigned long)(linearSpaceFree() >> 10),
 	        (unsigned long)(vramSpaceFree() >> 10));
