@@ -203,8 +203,8 @@ uint32_t pot(uint32_t v)
 		p <<= 1;
 	return p;
 }
-// Texel offset inside a PICA texture: 8x8 tiles in rows, Morton order inside a tile. Row 0 of the
-// GX image is stored as the texture's row 0, which is what t = 0 samples, so GX coordinates need no flip.
+// Texel offset inside a PICA texture: 8x8 tiles in rows, Morton order inside a tile. PICA stores
+// rows bottom-up (t = 0 samples the last stored row), so callers pass GX row y as h - 1 - y.
 inline uint32_t tiled(uint32_t x, uint32_t y, uint32_t w)
 {
 	static const uint8_t kMorton[8][8] = {
@@ -281,7 +281,7 @@ bool convert(Entry& e, const uint8_t* src, uint32_t fmt, uint32_t w, uint32_t h,
 		const uint32_t sy = y * h / ph;
 		for (uint32_t x = 0; x < pw; x++) {
 			const uint8_t* c = &s_rgba[((size_t)sy * w + x * w / pw) * 4];
-			const uint32_t o = tiled(x, y, pw);
+			const uint32_t o = tiled(x, ph - 1 - y, pw);
 			if (pf == GPU_RGBA8) {
 				uint8_t* d = dst + o * 4;  // little-endian 0xRRGGBBAA
 				d[0] = c[3];
