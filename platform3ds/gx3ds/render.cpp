@@ -144,22 +144,27 @@ void applyState()
 			return f;
 		return f == GPU_DST_ALPHA ? GPU_ONE : f == GPU_ONE_MINUS_DST_ALPHA ? GPU_ZERO : f;
 	};
+	// constant alpha 0 (CMODE1): the stored alpha is src * 0 + dst * 0 (other values: tev.cpp)
+	const uint32_t cm1 = g.bp[BP_CMODE1];
+	const bool alphaZero = ((cm1 >> 8) & 1) && (cm1 & 0xFF) == 0;
 	if (cm & 1) {
 		const bool sub = (cm >> 11) & 1;
 		if (sub)
-			C3D_AlphaBlend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_REVERSE_SUBTRACT, GPU_ONE, GPU_ONE, GPU_ONE, GPU_ONE);
+			C3D_AlphaBlend(GPU_BLEND_REVERSE_SUBTRACT, GPU_BLEND_REVERSE_SUBTRACT, GPU_ONE, GPU_ONE,
+			               alphaZero ? GPU_ZERO : GPU_ONE, alphaZero ? GPU_ZERO : GPU_ONE);
 		else {
 			GPU_BLENDFACTOR sf = noDstAlpha(kSrc[(cm >> 8) & 7]), df = noDstAlpha(kDst[(cm >> 5) & 7]);
-			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, sf, df, sf, df);
+			C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, sf, df, alphaZero ? GPU_ZERO : sf, alphaZero ? GPU_ZERO : df);
 		}
 	} else {
-		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, alphaZero ? GPU_ZERO : GPU_ONE, GPU_ZERO);
 	}
-	// GX front faces are clockwise on screen (sms-pc-port gx_render.cpp); the EFB-to-framebuffer
-	// mapping reverses orientation as GL's y flip does, so front faces are counter-clockwise here.
-	// GX cull 1 culls back faces, 2 front faces, 3 everything (flushBatch skips the draw).
+	// GX cull mode (GENMODE): 1 front, 2 back, 3 everything (flushBatch skips the draw). GX front
+	// faces are clockwise on screen (sms-pc-port gx_render.cpp); through the rotated top-screen
+	// framebuffer they reach the PICA clockwise too (seen in Azahar: the opposite choice drew only the
+	// inner faces of closed models and dropped the sky dome and 2D quads).
 	const uint32_t cull = (g.bp[BP_GENMODE] >> 14) & 3;
-	C3D_CullFace(cull == 1 ? GPU_CULL_BACK_CCW : cull == 2 ? GPU_CULL_FRONT_CCW : GPU_CULL_NONE);
+	C3D_CullFace(cull == 1 ? GPU_CULL_FRONT_CCW : cull == 2 ? GPU_CULL_BACK_CCW : GPU_CULL_NONE);
 	// The picture is 4:3 in the middle of the 400-pixel width: keep draws out of the side bars.
 	// Framebuffer coordinates are rotated (x along the screen's height, y along its width).
 	C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, kLetterbox, kScreenH, kScreenW - kLetterbox);

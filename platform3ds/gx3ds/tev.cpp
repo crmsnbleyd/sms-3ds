@@ -687,9 +687,18 @@ void setupTev(TevPlan& plan)
 			approx |= AX_DEST;
 		}
 	}
-	// constant alpha (BP CMODE1): what the EFB stores as alpha, so the last stage's alpha becomes it
+	// constant alpha (BP CMODE1) replaces only what the EFB stores; the alpha test and blending still
+	// see the TEV's alpha. 0 is done by the blend unit (applyState). Another value becomes the last
+	// stage's alpha when nothing reads that alpha (no alpha test, no blending by source alpha).
 	const uint32_t cm1 = g.bp[BP_CMODE1];
-	if ((cm1 >> 8) & 1) {
+	const uint32_t acTest = g.bp[BP_ALPHACOMPARE];
+	const bool alphaTested = !((((acTest >> 22) & 3) == 0 && ((acTest >> 16) & 7) == 7 && ((acTest >> 19) & 7) == 7) ||
+	                           (((acTest >> 22) & 3) == 1 && (((acTest >> 16) & 7) == 7 || ((acTest >> 19) & 7) == 7)));
+	const uint32_t cm0 = g.bp[BP_CMODE0], sf = (cm0 >> 8) & 7, df = (cm0 >> 5) & 7;
+	const bool srcAlphaBlend = (cm0 & 1) && (sf == 4 || sf == 5 || df == 4 || df == 5);
+	if (((cm1 >> 8) & 1) && (cm1 & 0xFF) != 0 && (alphaTested || srcAlphaBlend)) {
+		approx |= AX_ALPHA_TEST;
+	} else if (((cm1 >> 8) & 1) && (cm1 & 0xFF) != 0) {
 		int last = e.n < 6 ? e.n : 5;
 		if (last == e.n) {
 			passThrough(e.st[last], 0);
@@ -701,9 +710,6 @@ void setupTev(TevPlan& plan)
 		st.src[1][0] = st.src[1][1] = st.src[1][2] = GPU_CONSTANT;
 		st.op[1][0] = st.op[1][1] = st.op[1][2] = GPU_TEVOP_A_SRC_ALPHA;
 		st.k[3] = cm1 & 0xFF;
-		const uint32_t cm0 = g.bp[BP_CMODE0], sf = (cm0 >> 8) & 7, df = (cm0 >> 5) & 7;
-		if ((cm0 & 1) && (sf == 4 || sf == 5 || df == 4 || df == 5))
-			approx |= AX_ALPHA_TEST;  // blending by source alpha now sees the constant
 	}
 	approx |= e.why;
 
