@@ -84,7 +84,7 @@ void readClearValues()
 }
 
 // Per-fragment state from the BP registers (as gx_render.cpp applyGlState).
-void applyState(C3D_Tex* tex)
+void applyState()
 {
 	static const GPU_TESTFUNC kCmp[8] = {GPU_NEVER, GPU_LESS, GPU_EQUAL, GPU_LEQUAL,
 	                                     GPU_GREATER, GPU_NOTEQUAL, GPU_GEQUAL, GPU_ALWAYS};
@@ -130,19 +130,6 @@ void applyState(C3D_Tex* tex)
 	// The picture is 4:3 in the middle of the 400-pixel width: keep draws out of the side bars.
 	// Framebuffer coordinates are rotated (x along the screen's height, y along its width).
 	C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, kLetterbox, kScreenH, kScreenW - kLetterbox);
-	C3D_AlphaTest(false, GPU_ALWAYS, 0);
-
-	// TEV, Phase 2b: texture times the rasterised colour (the full TEV comes in 2c).
-	C3D_TexEnv* env = C3D_GetTexEnv(0);
-	C3D_TexEnvInit(env);
-	if (tex) {
-		C3D_TexBind(0, tex);
-		C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-		C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
-	} else {
-		C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
-		C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-	}
 }
 
 // The game clears the whole render target (citro3d has no partial clear), so the 4:3 picture's side
@@ -167,7 +154,7 @@ void drawSideBars()
 			o.pos[3] = 1.0f;
 			memset(o.clr, 0, 3);
 			o.clr[3] = 255;
-			o.tc[0] = o.tc[1] = 0.0f;
+			memset(o.tc, 0, sizeof o.tc);
 		}
 		const uint16_t q[6] = {0, 1, 2, 1, 3, 2};
 		for (int i = 0; i < 6; i++)
@@ -184,9 +171,15 @@ void drawSideBars()
 	C3D_TexEnvInit(env);
 	C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
 	C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+	for (int st = 1; st < 6; st++) {
+		C3D_TexEnv* e = C3D_GetTexEnv(st);
+		C3D_TexEnvInit(e);
+		C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+	}
 	C3D_BufInfo* bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
-	BufInfo_Add(bi, v, sizeof(OutVertex), 3, 0x210);
+	BufInfo_Add(bi, v, sizeof(OutVertex), 5, 0x43210);
 	C3D_DrawElements(GPU_TRIANGLES, 12, C3D_UNSIGNED_SHORT, ix);
 }
 
@@ -218,7 +211,9 @@ void rendererInit(float)
 	AttrInfo_Init(ai);
 	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);          // position
 	AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);  // colour
-	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);          // texcoord
+	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);          // texcoords, units 0..2
+	AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 2);
 	s_vertRing = (uint8_t*)linearAlloc(kVertRing);
 	s_idxRing = (uint8_t*)linearAlloc(kIdxRing);
 	s_ready = s_target && s_vertRing && s_idxRing;
@@ -363,28 +358,22 @@ void flushBatch()
 		resetBatch();
 		return;
 	}
-	// Phase 2b: the first TEV stage that samples a texture gives the map and coordinate.
-	const uint32_t nst = ((g.bp[BP_GENMODE] >> 10) & 15) + 1;
-	int texMap = -1, texCoord = -1;
-	for (uint32_t s = 0; s < nst && texMap < 0; s++) {
-		const uint32_t ord = (g.bp[BP_TREF + (s >> 1)] >> ((s & 1) * 12)) & 0x3FF;
-		if ((ord >> 6) & 1) {
-			texMap = ord & 7;
-			texCoord = (ord >> 3) & 7;
-		}
-	}
+	applyState();
+	TevPlan plan;
+	setupTev(plan);
 	OutVertex* ov = (OutVertex*)(s_vertRing + s_vertUsed);
-	transform(s_verts.data(), s_count, s_fmt, s_stride, texCoord, ov);
+	transform(s_verts.data(), s_count, s_fmt, s_stride, plan.coord, plan.units, ov);
+	for (int u = 0; u < plan.units; u++)
+		C3D_TexBind(u, textureForMap(plan.map[u]));
 	uint16_t* oi = (uint16_t*)(s_idxRing + s_idxUsed);
 	for (size_t i = 0; i < s_idx.size(); i++)
 		oi[i] = (uint16_t)s_idx[i];
 	s_vertUsed += (vbytes + 15) & ~(size_t)15;
 	s_idxUsed += (ibytes + 15) & ~(size_t)15;
 
-	applyState(texMap >= 0 ? textureForMap(texMap) : nullptr);
 	C3D_BufInfo* bi = C3D_GetBufInfo();
 	BufInfo_Init(bi);
-	BufInfo_Add(bi, ov, sizeof(OutVertex), 3, 0x210);
+	BufInfo_Add(bi, ov, sizeof(OutVertex), 5, 0x43210);
 	C3D_DrawElements(GPU_TRIANGLES, (int)s_idx.size(), C3D_UNSIGNED_SHORT, oi);
 	s_frameBatches++;
 	s_frameVerts += s_count;

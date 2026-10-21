@@ -56,8 +56,9 @@ void drawBottom()
 	    (unsigned long)sms3ds_gx_vertices_per_frame);
 	put("\x1b[9;1Hcpu %5.1f ms  gpu %5.1f ms  drop %lu  ", (double)sms3ds_gx_cpu_ms, (double)sms3ds_gx_gpu_ms,
 	    (unsigned long)sms3ds_gx_dropped);
-	put("\x1b[10;1Happ mem free %6lu KiB  ", (unsigned long)(osGetMemRegionFree(MEMREGION_APPLICATION) >> 10));
-	put("\x1b[11;1Hheap %lu KiB, linear %lu KiB", (unsigned long)(envGetHeapSize() >> 10),
+	put("\x1b[10;1Htev approximations %10lu", (unsigned long)sms3ds_gx_tev_approx);
+	put("\x1b[11;1Happ mem free %6lu KiB  ", (unsigned long)(osGetMemRegionFree(MEMREGION_APPLICATION) >> 10));
+	put("\x1b[12;1Hheap %lu KiB, linear %lu KiB", (unsigned long)(envGetHeapSize() >> 10),
 	    (unsigned long)(envGetLinearHeapSize() >> 10));
 	put("\x1b[13;1Hgame state %-3d area %-3d episode %-3d  ", sms3ds_state, sms3ds_area, sms3ds_episode);
 	put("\x1b[14;1Hsave file  %-3d", sms3ds_save_file);

@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | 0 | macOS toolchain (devkitPro), reference repos, PC baseline build, recon (`docs/PORT-MAP.md`) | done 2026-10-21 |
 | 1 | Headless boot: `sms_3ds.3dsx` runs the decomp + PC platform layer on 3DS with a null GX backend; the console shows the game advancing to a stage load | built 2026-10-21; awaiting first Azahar run |
-| 2 | Renderer: citro3d backend behind `gx_internal.h`'s seam (replaces `platform3ds/gx_null_backend.cpp`); TEV → PICA200 combiners; texture conversion with a hash-keyed 3DS texture pack from the browser converter, runtime fallback | — |
+| 2 | Renderer: citro3d backend behind `gx_internal.h`'s seam (replaces `platform3ds/gx_null_backend.cpp`); TEV → PICA200 combiners; texture conversion with a hash-keyed 3DS texture pack from the browser converter, runtime fallback | 2a geometry ✓, 2b textures ✓ (title + file select recognisable), 2c TEV built; 2d (EFB copies) next |
 | 3 | Input (HID → PAD, C-stick on New 3DS) and audio (DSP mixer → ndsp; DSP-ADPCM is native) | — |
 | 4 | Performance: 804 MHz, second core, hot loops (skinning, matrix maths, FIFO parsing) | — |
 | 5 | Browser asset converter (reads the user's disc image locally, writes the 3DS texture pack) | — |

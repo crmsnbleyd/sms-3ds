@@ -52,6 +52,7 @@ extern volatile uint32_t sms3ds_gx_vertices;    // vertices decoded
 // gx3ds/render.cpp: the last finished frame
 extern volatile uint32_t sms3ds_gx_batches_per_frame, sms3ds_gx_vertices_per_frame, sms3ds_gx_dropped;
 extern volatile float sms3ds_gx_cpu_ms, sms3ds_gx_gpu_ms;  // citro3d processing / drawing time
+extern volatile uint32_t sms3ds_gx_tev_approx;  // gx3ds/tev.cpp: batches drawn with an approximated TEV
 
 #ifdef __cplusplus
 }
