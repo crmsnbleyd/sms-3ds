@@ -1,0 +1,22 @@
+; sms-3ds GX backend, Phase 2a: the CPU has already transformed and lit every vertex
+; (platform3ds/gx3ds/xform.cpp), so positions arrive in PICA clip space.
+; v0: position (float xyzw, clip space, tilted for the top screen)
+; v1: colour   (ubyte RGBA, 0..255)
+; v2: texcoord (float xy) -- used from Phase 2b
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+
+.alias inpos v0
+.alias inclr v1
+.alias intc0 v2
+
+.constf k(0.00392156862745, 1.0, 0.0, 0.0)
+
+.proc main
+	mov outpos, inpos
+	mul outclr, k.xxxx, inclr
+	mov outtc0, intc0
+	end
+.end

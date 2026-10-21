@@ -168,7 +168,23 @@ foreach(f GDBase GDGeometry GDLight GDPixel GDTev GDTransform)
 endforeach()
 set_source_files_properties(${SMS_GX_GD_SOURCES} PROPERTIES
   COMPILE_OPTIONS "-include;${SMS_PC_PORT_DIR}/platform/gx/src/gd_host_prefix.h;-w;-fcommon")
-add_library(sms_gx STATIC ${SMS_GX_FRONT_SOURCES} ${SMS_GX_GD_SOURCES} platform3ds/gx_null_backend.cpp)
+# Renderer: gx3ds (citro3d, Phase 2) or the null backend (Phase 1: counts what would be drawn).
+set(SMS_3DS_GX c3d CACHE STRING "GX backend: c3d or null")
+if(SMS_3DS_GX STREQUAL "null")
+  set(SMS_GX_BACKEND_SOURCES platform3ds/gx_null_backend.cpp)
+else()
+  set(SMS_GX_BACKEND_SOURCES platform3ds/gx3ds/render.cpp platform3ds/gx3ds/xform.cpp)
+  # Built with libctru's short enums (they include <citro3d.h>); they share no enum-typed struct
+  # members with the GX front end.
+  set_source_files_properties(${SMS_GX_BACKEND_SOURCES} PROPERTIES COMPILE_OPTIONS "-fshort-enums")
+  ctr_add_shader_library(gx3ds_passthru platform3ds/gx3ds/passthru.v.pica)
+  dkp_add_embedded_binary_library(gx3ds_shaders gx3ds_passthru)
+endif()
+add_library(sms_gx STATIC ${SMS_GX_FRONT_SOURCES} ${SMS_GX_GD_SOURCES} ${SMS_GX_BACKEND_SOURCES})
+if(TARGET gx3ds_shaders)
+  target_link_libraries(sms_gx PRIVATE gx3ds_shaders)
+endif()
+target_include_directories(sms_gx PRIVATE ${CMAKE_SOURCE_DIR}/platform3ds ${CMAKE_SOURCE_DIR}/platform3ds/gx3ds)
 target_include_directories(sms_gx PRIVATE
   ${SMS_PORT_PATCHED_INCLUDE_DIRS} ${SMS_PORT_ORIG_INCLUDE_DIRS}
   ${SMS_PC_PORT_DIR}/platform/gx/port_include
@@ -235,7 +251,7 @@ set_source_files_properties(${SMS_PC_PORT_DIR}/platform/misc/msl_math.c ${SMS_PC
   PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 target_link_libraries(sms_3ds PRIVATE
   -Wl,--whole-archive sms_game sms_gx -Wl,--no-whole-archive
-  ctru m)
+  citro3d ctru m)
 set_property(TARGET sms_3ds APPEND PROPERTY LINK_OPTIONS -Wl,-Map,${CMAKE_BINARY_DIR}/sms_3ds.map)
 # Mixed enum sizes are intended (see -fno-short-enums above): no struct with an enum member crosses
 # between libctru/<3ds.h> code and game code.
