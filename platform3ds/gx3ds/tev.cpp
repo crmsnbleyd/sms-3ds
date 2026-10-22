@@ -593,7 +593,7 @@ bool copyLoc(const Prog& p, bool alpha, const Loc* col, const Loc* alp, Loc& out
 
 }  // namespace
 
-void setupTev(TevPlan& plan, uint32_t copyMaps)
+void compileTev(TevPlan& plan, uint32_t copyMaps)
 {
 	const uint32_t gen = g.bp[BP_GENMODE];
 	const uint32_t nst = ((gen >> 10) & 15) + 1;
@@ -751,7 +751,7 @@ void setupTev(TevPlan& plan, uint32_t copyMaps)
 	approx |= e.why;
 
 	for (int s = 0; s < 6; s++) {
-		C3D_TexEnv* env = C3D_GetTexEnv(s);
+		C3D_TexEnv* env = &plan.env[s];
 		C3D_TexEnvInit(env);
 		if (s >= e.n) {  // pass the result through the unused stages
 			C3D_TexEnvSrc(env, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
@@ -774,8 +774,13 @@ void setupTev(TevPlan& plan, uint32_t copyMaps)
 		mc |= e.bufUpd[0][s] ? 1 << s : 0;
 		ma |= e.bufUpd[1][s] ? 1 << s : 0;
 	}
-	C3D_TexEnvBufUpdate(C3D_RGB, mc);
-	C3D_TexEnvBufUpdate(C3D_Alpha, ma);
+	plan.bufRgb = (uint8_t)mc;
+	plan.bufAlpha = (uint8_t)ma;
+	auto alphaTest = [&](bool on, GPU_TESTFUNC f, int ref) {
+		plan.alphaTest = on;
+		plan.alphaFunc = f;
+		plan.alphaRef = ref;
+	};
 
 	// alpha compare (BP 0xF3): one PICA test; GX's two-test AND/OR keeps the meaningful one
 	const uint32_t ac = g.bp[BP_ALPHACOMPARE];
@@ -789,25 +794,34 @@ void setupTev(TevPlan& plan, uint32_t copyMaps)
 	const bool always0 = always(c0, ref0), always1 = always(c1, ref1) || same;
 	const bool never0 = never(c0, ref0), never1 = never(c1, ref1) || same;
 	if (logic == 0 && always0 && always1)  // AND, both pass
-		C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		alphaTest(false, GPU_ALWAYS, 0);
 	else if (logic == 0 && always1)
-		C3D_AlphaTest(true, kCmp[c0], (int)ref0);
+		alphaTest(true, kCmp[c0], (int)ref0);
 	else if (logic == 0 && always0)
-		C3D_AlphaTest(true, kCmp[c1], (int)ref1);
+		alphaTest(true, kCmp[c1], (int)ref1);
 	else if (logic == 1 && never1)  // OR with a never
-		C3D_AlphaTest(true, kCmp[c0], (int)ref0);
+		alphaTest(true, kCmp[c0], (int)ref0);
 	else if (logic == 1 && never0)
-		C3D_AlphaTest(true, kCmp[c1], (int)ref1);
+		alphaTest(true, kCmp[c1], (int)ref1);
 	else if (logic == 1 && (always0 || always1))
-		C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		alphaTest(false, GPU_ALWAYS, 0);
 	else {
-		C3D_AlphaTest(true, kCmp[c0], (int)ref0);
+		alphaTest(true, kCmp[c0], (int)ref0);
 		approx |= AX_ALPHA_TEST;
 	}
 
 	if ((g.bp[BP_FOG3] >> 21) & 7)
 		approx |= AX_FOG;  // fog: later
 	plan.why = approx;
+}
+
+void applyTev(const TevPlan& plan)
+{
+	for (int s = 0; s < 6; s++)
+		*C3D_GetTexEnv(s) = plan.env[s];  // marks the stage dirty
+	C3D_TexEnvBufUpdate(C3D_RGB, plan.bufRgb);
+	C3D_TexEnvBufUpdate(C3D_Alpha, plan.bufAlpha);
+	C3D_AlphaTest(plan.alphaTest, plan.alphaFunc, plan.alphaRef);
 }
 
 }  // namespace gx3ds

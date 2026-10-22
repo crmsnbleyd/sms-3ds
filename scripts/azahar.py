@@ -131,6 +131,7 @@ def cmd_hud():
             str(x) for x in read(c, "sms3ds_gx_count", "5I"))),
         ("write-back us / begin wait us", "%d / %d" % read(c, "sms3ds_gx_count", "8I")[6:]),
         ("write-back tiles re-encoded", read(c, "sms3ds_gx_count", "8I")[5]),
+        ("tev compiles", read(c, "sms3ds_gx_count", "9I")[8]),
         ("approx why", "%05x" % u("sms3ds_gx_approx_why")),
     ]
     st = rpc().perf_stats()

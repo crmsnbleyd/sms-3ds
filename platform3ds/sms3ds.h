@@ -80,9 +80,9 @@ extern volatile float sms3ds_prof_dl_ms;
 extern volatile uint32_t sms3ds_gx_dl_calls, sms3ds_gx_stream_kb;
 // gx3ds, last frame (read by scripts/azahar.py): pixel-state applications, vertex set-up misses,
 // uniform vec4s changed, texture binds, display-list arena KiB uploaded, EFB-copy tiles re-encoded for
-// write-backs, and the frame start's write-backs and GPU wait (us)
+// write-backs, the frame start's write-backs and GPU wait (us), TEV compiles (cache misses)
 enum { SMS3DS_CNT_PIXEL, SMS3DS_CNT_VTXMISS, SMS3DS_CNT_UNIF, SMS3DS_CNT_TEXBIND, SMS3DS_CNT_ARENAKB,
-       SMS3DS_CNT_WBTILES, SMS3DS_CNT_WBUS, SMS3DS_CNT_BEGINWAITUS, SMS3DS_CNT_N };
+       SMS3DS_CNT_WBTILES, SMS3DS_CNT_WBUS, SMS3DS_CNT_BEGINWAITUS, SMS3DS_CNT_TEVCOMPILE, SMS3DS_CNT_N };
 extern volatile uint32_t sms3ds_gx_count[SMS3DS_CNT_N];
 void sms3ds_prof_begin(int phase);
 void sms3ds_prof_end(int phase);

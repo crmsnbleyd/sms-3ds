@@ -25,7 +25,7 @@
 
 namespace gx {
 uint32_t g_displayFrames;
-bool g_gxStats = true;  // gx_fifo.cpp times its vertex loader (g_decodeSeconds) for the HUD
+bool g_gxStats = false;  // gx_fifo.cpp times its vertex loader (g_decodeSeconds) for the HUD
 extern double g_decodeSeconds;
 double g_flushSeconds;
 uint32_t g_traceLastVat;
@@ -335,6 +335,9 @@ struct CopyTex {
 	uint32_t layout = 0, tw = 0, th = 0;
 };
 std::unordered_map<const void*, CopyTex> s_copies;
+// s_copies' destinations as a short array (copyMaps scans it for every draw); rebuilt when stale
+const void* s_copyDests[32];
+int s_copyDestCount = -1;  // -1: rebuild
 std::vector<CopyTex> s_retired;  // replaced while a frame in flight may still sample them
 C3D_Tex s_efbTex;
 bool s_efbTexOk;
@@ -350,6 +353,7 @@ void freeRetired()
 			if (g_displayFrames - it->second.frame > 120) {
 				s_retired.push_back(it->second);
 				it = s_copies.erase(it);
+				s_copyDestCount = -1;
 			} else {
 				++it;
 			}
@@ -432,6 +436,7 @@ void copyToTexture(uint32_t ctrl)
 	const uint32_t pw = potClamp((w + 1) / 2), ph = potClamp((h + 1) / 2);
 
 	CopyTex& c = s_copies[dest];
+	s_copyDestCount = -1;
 	if (c.rt && (c.tex.width != pw || c.tex.height != ph)) {
 		s_retired.push_back(c);  // it owns the textures and the write-back buffer now
 		c.rt = nullptr;
@@ -445,12 +450,14 @@ void copyToTexture(uint32_t ctrl)
 			fprintf(stderr, "[gx3ds] texture copy %ux%u to %p: no VRAM (%lu KiB free)\n", (unsigned)pw, (unsigned)ph,
 			        dest, (unsigned long)(vramSpaceFree() >> 10));
 			s_copies.erase(dest);
+			s_copyDestCount = -1;
 			return;
 		}
 		c.rt = C3D_RenderTargetCreateFromTex(&c.tex, GPU_TEXFACE_2D, 0, C3D_DEPTHTYPE(-1));
 		if (!c.rt) {
 			C3D_TexDelete(&c.tex);
 			s_copies.erase(dest);
+			s_copyDestCount = -1;
 			return;
 		}
 		fprintf(stderr, "[gx3ds] texture copy (%g,%g) %ux%u fmt %u%s%s to %p: %ux%u texture\n", (double)x0, (double)y0,
@@ -869,6 +876,7 @@ void calibrateCopies()
 		}
 		s_retired.push_back(it->second);
 		s_copies.erase(it);
+		s_copyDestCount = -1;
 	}
 	if (found >= 0 && found < 4) {
 		s_copyFlipS = found & 1;
@@ -985,28 +993,85 @@ void dumpBatch(const TevPlan& plan, uint32_t why)
 	}
 }
 
-// The BP state applyState and setupTev read. Consecutive batches often differ only in XF (matrices),
+// The BP state applyState and compileTev read. Consecutive batches often differ only in XF (matrices),
 // so when this snapshot matches the previous batch's, the combiners, blending, depth and alpha test
-// set up for it still hold and are not rebuilt.
+// set up for it still hold and are not rebuilt; other snapshots find their compiled TEV in s_tevCache.
 constexpr int kPixelWords = 7 + 32 + 8 + 8 + 8 + 8 + 4 + 1;  // must match snapshotPixel
 struct PixelState {
 	uint32_t w[kPixelWords];
 	bool operator==(const PixelState& o) const { return memcmp(w, o.w, sizeof w) == 0; }
 };
 PixelState s_lastPixel;
-TevPlan s_lastPlan;
+const TevPlan* s_lastPlan;  // in s_tevCache (valid until the next tevPlanFor)
+
+// Compiled TEV plans by pixel state (a frame at the plaza changes state ~400 times between a few
+// hundred distinct states; compiling took ~10 us each). Open addressing; cleared when 3/4 full.
+struct TevCacheEntry {
+	bool used;
+	uint32_t hash;
+	PixelState key;
+	TevPlan plan;
+};
+constexpr uint32_t kTevCache = 1024;
+TevCacheEntry* s_tevCache;
+uint32_t s_tevCacheUsed;
+
+uint32_t hashPixel(const PixelState& p)
+{
+	uint32_t h = 2166136261u;
+	for (int i = 0; i < kPixelWords; i++)
+		h = (h ^ p.w[i]) * 16777619u;
+	return h ^ (h >> 15);
+}
+
+const TevPlan& tevPlanFor(const PixelState& ps)
+{
+	if (!s_tevCache)
+		s_tevCache = (TevCacheEntry*)calloc(kTevCache, sizeof(TevCacheEntry));
+	const uint32_t h = hashPixel(ps);
+	uint32_t i = h & (kTevCache - 1);
+	for (; s_tevCache[i].used; i = (i + 1) & (kTevCache - 1))
+		if (s_tevCache[i].hash == h && s_tevCache[i].key == ps)
+			return s_tevCache[i].plan;
+	if (s_tevCacheUsed >= kTevCache * 3 / 4) {
+		memset(s_tevCache, 0, kTevCache * sizeof(TevCacheEntry));
+		s_tevCacheUsed = 0;
+		i = h & (kTevCache - 1);
+	}
+	TevCacheEntry& e = s_tevCache[i];
+	e.used = true;
+	e.hash = h;
+	e.key = ps;
+	compileTev(e.plan, ps.w[kPixelWords - 1]);
+	s_tevCacheUsed++;
+	g_gxCount[SMS3DS_CNT_TEVCOMPILE]++;
+	return e.plan;
+}
 
 // GX maps (bit per map) whose current texture is an EFB copy.
 uint32_t copyMaps()
 {
+	if (s_copyDestCount < 0) {
+		s_copyDestCount = 0;
+		for (auto& kv : s_copies)
+			if (s_copyDestCount < 32)
+				s_copyDests[s_copyDestCount++] = kv.first;
+	}
 	uint32_t m = 0;
-	for (int i = 0; i < 8; i++)
-		if (g.texImage[i] && copyTexture(g.texImage[i]))
+	for (int i = 0; i < 8; i++) {
+		const void* t = g.texImage[i];
+		if (!t)
+			continue;
+		bool maybe = s_copies.size() > 32;  // more than the array holds: copyTexture looks it up
+		for (int k = 0; k < s_copyDestCount && !maybe; k++)
+			maybe = s_copyDests[k] == t;
+		if (maybe && copyTexture(t))
 			m |= 1u << i;
+	}
 	return m;
 }
 
-void snapshotPixel(PixelState& p)
+void snapshotPixel(PixelState& p, uint32_t maps)
 {
 	int n = 0;
 	p.w[n++] = g.bp[BP_GENMODE];
@@ -1030,7 +1095,7 @@ void snapshotPixel(PixelState& p)
 	p.w[n++] = g.xfReg[XFR_COLOR0CTRL + 1];
 	p.w[n++] = g.xfReg[XFR_ALPHA0CTRL + 1];
 	p.w[n++] = g.xfReg[XFR_MAT0 + 1];
-	p.w[n++] = copyMaps();  // EFB-copy textures take compares by arithmetic, not baking
+	p.w[n++] = maps;  // copyMaps(): EFB-copy textures take compares by arithmetic, not baking
 	if (n != kPixelWords)
 		svcBreak(USERBREAK_PANIC);
 }
@@ -1256,19 +1321,21 @@ void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t 
 	const u64 ts = svcGetSystemTick();
 	// unchanged unless something was written since, or a map's EFB copy went stale (copyTexture
 	// decides that on use, without a state write)
-	if (!s_lastPixelValid || s_pixelVersion != s_stateVersion || copyMaps() != s_lastPixel.w[kPixelWords - 1]) {
+	const uint32_t maps = copyMaps();
+	if (!s_lastPixelValid || s_pixelVersion != s_stateVersion || maps != s_lastPixel.w[kPixelWords - 1]) {
 		PixelState ps;
-		snapshotPixel(ps);
+		snapshotPixel(ps, maps);
 		if (!s_lastPixelValid || !(ps == s_lastPixel)) {
 			applyState();
-			setupTev(s_lastPlan, ps.w[kPixelWords - 1]);
+			s_lastPlan = &tevPlanFor(ps);
+			applyTev(*s_lastPlan);
 			g_gxCount[SMS3DS_CNT_PIXEL]++;
 			s_lastPixel = ps;
 			s_lastPixelValid = true;
 		}
 		s_pixelVersion = s_stateVersion;
 	}
-	const TevPlan& plan = s_lastPlan;
+	const TevPlan& plan = *s_lastPlan;
 	const u64 tx0 = svcGetSystemTick();
 	s_tState += tx0 - ts;
 	const bool ok = vtxSetup(plan, s_fmt, s_stride, base);

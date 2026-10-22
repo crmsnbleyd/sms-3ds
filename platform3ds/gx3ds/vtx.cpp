@@ -176,7 +176,7 @@ void vtxInit(shaderProgram_s* prog)
 uint32_t g_vtxWhy;
 uint32_t g_xfMemVersion;
 uint32_t g_gxCount[SMS3DS_CNT_N];
-static_assert(SMS3DS_CNT_N == 8, "gx3ds.h g_gxCount");
+static_assert(SMS3DS_CNT_N == 9, "gx3ds.h g_gxCount");
 
 namespace {
 // What the previous vtxSetup depended on: when a batch repeats it (common for display-list runs of one

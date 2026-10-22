@@ -55,22 +55,31 @@ struct TexCmp {
 	}
 };
 
-// tev.cpp: what the current TEV needs, and the combiners set up for it (setupTev).
+// tev.cpp: what the current TEV needs, and the combiners set up for it (compileTev).
 struct TevPlan {
 	int units;       // texture units used (0..3)
 	int map[3];      // GX texture map per unit
 	int coord[3];    // GX texture coordinate per unit
 	TexCmp cmp[3];   // per unit: a compare baked into the texture
 	uint32_t why;    // AX_* approximations made
+	// what applyTev hands citro3d: the six combiner stages, their buffer updates, the alpha test
+	C3D_TexEnv env[6];
+	uint8_t bufRgb, bufAlpha;
+	bool alphaTest;
+	GPU_TESTFUNC alphaFunc;
+	int alphaRef;
 };
-void setupTev(TevPlan& plan, uint32_t copyMaps);  // copyMaps: GX maps whose texture is an EFB copy
+// Compiles the current TEV state into `plan` (copyMaps: GX maps whose texture is an EFB copy); it
+// depends only on the state render.cpp's snapshotPixel records, so plans are cached by that.
+void compileTev(TevPlan& plan, uint32_t copyMaps);
+void applyTev(const TevPlan& plan);
 
 // vtx.cpp: the GPU vertex pipeline (gx.v.pica). vtxSetup points the PICA at a batch of packed GX
 // vertices of format `fmt` (gx_fifo.cpp's vtxFmtLayout) at `base` in linear memory and sets the
 // uniforms from the current XF state for the texture units in `plan`; false: cannot be drawn.
 void vtxInit(shaderProgram_s* prog);
 void vtxInvalidate();  // another program changed the vertex uniforms
-extern uint32_t g_gxCount[8];  // this frame's sms3ds_gx_count (sms3ds.h SMS3DS_CNT_N)
+extern uint32_t g_gxCount[9];  // this frame's sms3ds_gx_count (sms3ds.h SMS3DS_CNT_N)
 extern uint32_t g_xfMemVersion;  // bumped on every change to XF memory (markXfMemDirty)
 bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* base);
 extern uint32_t g_vtxWhy;  // AX_* approximations made by the last vtxSetup
