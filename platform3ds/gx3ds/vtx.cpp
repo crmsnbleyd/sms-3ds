@@ -172,11 +172,68 @@ void vtxInit(shaderProgram_s* prog)
 }
 
 uint32_t g_vtxWhy;
+uint32_t g_xfMemVersion;
 
-void vtxInvalidate() { memset(s_shadowValid, 0, sizeof s_shadowValid); }
+namespace {
+// What the previous vtxSetup depended on: when a batch repeats it (common for display-list runs of one
+// shape), only the vertex buffer's address changes.
+struct SetupKey {
+	uint32_t fmt, stride, units, coord[3], xfVersion;
+	uint32_t reg[32];
+	bool operator==(const SetupKey& o) const { return !memcmp(this, &o, sizeof *this); }
+};
+SetupKey s_lastKey;
+bool s_lastKeyValid, s_lastOk;
+uint32_t s_lastEntries;
+u64 s_lastPerm;
+uint32_t s_lastWhy;
+
+void fillKey(SetupKey& k, const TevPlan& plan, uint32_t fmt, uint32_t stride)
+{
+	memset(&k, 0, sizeof k);
+	k.fmt = fmt;
+	k.stride = stride;
+	k.units = (uint32_t)plan.units;
+	for (int u = 0; u < 3; u++)
+		k.coord[u] = u < plan.units ? (uint32_t)plan.coord[u] : ~0u;
+	k.xfVersion = g_xfMemVersion;
+	static const uint8_t kRegs[] = {XFR_NUMCHANS,   XFR_AMB0,         XFR_MAT0,         XFR_COLOR0CTRL,
+	                                XFR_ALPHA0CTRL, XFR_MATIDX_A,     XFR_MATIDX_B,     XFR_NUMTEXGENS,
+	                                XFR_VIEWPORT,   XFR_VIEWPORT + 1, XFR_VIEWPORT + 2, XFR_VIEWPORT + 3,
+	                                XFR_VIEWPORT + 4, XFR_VIEWPORT + 5, XFR_PROJ,       XFR_PROJ + 1,
+	                                XFR_PROJ + 2,   XFR_PROJ + 3,     XFR_PROJ + 4,     XFR_PROJ + 5,
+	                                XFR_PROJ + 6,   XFR_TEXGEN,       XFR_TEXGEN + 1,   XFR_TEXGEN + 2,
+	                                XFR_TEXGEN + 3, XFR_TEXGEN + 4,   XFR_TEXGEN + 5,   XFR_TEXGEN + 6,
+	                                XFR_TEXGEN + 7};
+	static_assert(sizeof kRegs <= 32, "SetupKey::reg");
+	for (size_t i = 0; i < sizeof kRegs; i++)
+		k.reg[i] = g.xfReg[kRegs[i]];
+}
+}  // namespace
+
+void vtxInvalidate()
+{
+	memset(s_shadowValid, 0, sizeof s_shadowValid);
+	s_lastKeyValid = false;
+}
 
 bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* base)
 {
+	SetupKey key;
+	fillKey(key, plan, fmt, stride);
+	if (s_lastKeyValid && key == s_lastKey) {
+		if (s_lastOk) {
+			C3D_BufInfo* bi = C3D_GetBufInfo();
+			BufInfo_Init(bi);
+			BufInfo_Add(bi, base, stride, (int)s_lastEntries, s_lastPerm);
+		}
+		g_vtxWhy = s_lastWhy;
+		return s_lastOk;
+	}
+	s_lastKey = key;
+	s_lastKeyValid = true;
+	s_lastOk = false;
+	s_lastWhy = 0;
 	bool approx = false;
 	const VtxFmtLayout& lay = vtxFmtLayout(fmt);
 	const uint32_t matA = g.xfReg[XFR_MATIDX_A], matB = g.xfReg[XFR_MATIDX_B];
@@ -309,6 +366,10 @@ bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* ba
 	BufInfo_Init(bi);
 	BufInfo_Add(bi, base, stride, entries, perm);
 	g_vtxWhy = (approx ? AX_TEXGEN : 0) | (lightApprox ? AX_LIGHT : 0);
+	s_lastOk = true;
+	s_lastEntries = (uint32_t)entries;
+	s_lastPerm = perm;
+	s_lastWhy = g_vtxWhy;
 	return true;
 }
 

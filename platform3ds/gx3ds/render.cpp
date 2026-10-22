@@ -996,7 +996,7 @@ void rendererInit(float)
 
 bool rendererReady() { return s_ready; }
 void onStateChange() { flushBatch(); }
-void markXfMemDirty() {}
+void markXfMemDirty() { g_xfMemVersion++; }
 
 PrimClass primClass(uint8_t op) { return op >= 0xB8 ? PRIM_POINTS : op >= 0xA8 ? PRIM_LINES : PRIM_TRIS; }
 
