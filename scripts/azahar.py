@@ -11,6 +11,7 @@
 #                                                 joined with +; "-" for none) and the circle pad
 #                                                 (3DS units, rim ~156) for SECONDS (default 0.2)
 #   uv run scripts/azahar.py wait-area AREA [TIMEOUT]   until the game is in that area (state 5)
+#   uv run scripts/azahar.py plaza                from the title screen to Delfino Plaza (file A)
 #   uv run scripts/azahar.py log [N]              the last N lines of the game's log.txt
 #
 # Uses the AzaharRPC.py that ships with Azahar (AZAHAR_SCRIPTING, default ~/Downloads/azahar/scripting)
@@ -71,17 +72,24 @@ def alive(c):
 
 
 def cmd_quit():
-    subprocess.run(["osascript", "-e", 'quit app "Azahar"'], capture_output=True)
+    # SIGTERM rather than a polite quit: that one asks for confirmation (Azahar's own dialog)
+    pat = "Azahar.app/Contents/MacOS"
+    subprocess.run(["pkill", "-TERM", "-f", pat], capture_output=True)
     for _ in range(50):
-        if subprocess.run(["pgrep", "-f", "Azahar.app/Contents/MacOS"], capture_output=True).returncode:
+        if subprocess.run(["pgrep", "-f", pat], capture_output=True).returncode:
             return
         time.sleep(0.2)
-    subprocess.run(["pkill", "-f", "Azahar.app/Contents/MacOS"])
+    subprocess.run(["pkill", "-KILL", "-f", pat])
 
 
 def cmd_launch(path=DEFAULT_3DSX):
     cmd_quit()
-    subprocess.run(["open", "-a", APP, "--args", os.path.abspath(path)], check=True)
+    for attempt in range(10):  # right after a kill, LaunchServices may still refuse (error -600)
+        if not subprocess.run(["open", "-a", APP, "--args", os.path.abspath(path)]).returncode:
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit("could not open Azahar")
     c = rpc()
     for _ in range(150):
         if alive(c):
@@ -119,6 +127,10 @@ def cmd_hud():
         ("batches / verts", "%d / %d" % (u("sms3ds_gx_batches_per_frame"), u("sms3ds_gx_vertices_per_frame"))),
         ("fresh / replay verts", "%d / %d" % (u("sms3ds_gx_fresh_verts"), u("sms3ds_gx_replay_verts"))),
         ("hit / move / anim / draw / mix", " / ".join("%.1f" % x for x in ph)),
+        ("pixel / vtx miss / unif / texbind / arena KiB", " / ".join(
+            str(x) for x in read(c, "sms3ds_gx_count", "5I"))),
+        ("write-back us / begin wait us", "%d / %d" % read(c, "sms3ds_gx_count", "8I")[6:]),
+        ("write-back tiles re-encoded", read(c, "sms3ds_gx_count", "8I")[5]),
         ("approx why", "%05x" % u("sms3ds_gx_approx_why")),
     ]
     st = rpc().perf_stats()
@@ -161,6 +173,58 @@ def cmd_wait_area(area, timeout="60"):
             return
         time.sleep(0.5)
     raise SystemExit("not in area %s after %s s" % (area, timeout))
+
+
+BLOCK_A_X = 846.0  # Mario's x under save block A at the file select (x grows to the right on screen)
+
+
+def mario_pos(c):
+    p = read(c, "gpMarioPos", "I")[0]
+    data = c.read_memory(p, 12) if p else None
+    return struct.unpack("<3f", data) if data else None
+
+
+def cmd_plaza():
+    # title -> file A -> Delfino Plaza, past the "explanation again?" question and the flyover
+    c = rpc()
+    state = lambda: (read(c, "sms3ds_state", "i")[0], read(c, "sms3ds_area", "i")[0])
+    cmd_wait_area(15, "60")
+    # The title and the file select are one scene with Mario at the same spot: alternate START with
+    # stick pushes (which also wake him when he lies asleep) until he walks, i.e. the file select is
+    # up and he is controllable.
+    for _ in range(60):
+        if mario_pos(c):
+            break
+        time.sleep(0.5)
+    x0 = mario_pos(c)[0]
+    for i in range(40):
+        if i % 3 == 0:
+            cmd_pad("START")
+            time.sleep(1.0)
+        cmd_pad("-", "0.3", "-156", "0")
+        time.sleep(0.5)
+        if abs(mario_pos(c)[0] - x0) > 1:
+            break
+    else:
+        raise SystemExit("Mario never became controllable at the file select")
+    # walk under block A in short pushes, steering by his position
+    for _ in range(60):
+        dx = BLOCK_A_X - mario_pos(c)[0]
+        if abs(dx) < 25:
+            break
+        cmd_pad("-", "0.1" if abs(dx) < 80 else "0.3", "156" if dx > 0 else "-156", "0")
+        time.sleep(0.4)
+    else:
+        raise SystemExit("could not walk under block A (x %.0f)" % mario_pos(c)[0])
+    time.sleep(0.5)
+    cmd_pad("A")  # jump into the block: its menu, START highlighted
+    time.sleep(2.5)
+    cmd_pad("A")
+    cmd_wait_area(1, "60")
+    for _ in range(12):  # "No" to the explanation question, then skip/ride out the flyover
+        time.sleep(1.5)
+        cmd_pad("A")
+    print("in the plaza")
 
 
 def cmd_log(n="30"):

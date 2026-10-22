@@ -42,6 +42,7 @@ volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
 volatile float sms3ds_prof_replay_ms, sms3ds_prof_begin_ms, sms3ds_prof_state_ms, sms3ds_prof_idx_ms,
     sms3ds_prof_draw_ms, sms3ds_prof_copy_ms;
 volatile uint32_t sms3ds_gx_fresh_verts, sms3ds_gx_replay_verts;
+volatile uint32_t sms3ds_gx_count[SMS3DS_CNT_N];
 namespace {
 u64 s_phaseStart[SMS3DS_PROF_PHASES], s_phaseTicks[SMS3DS_PROF_PHASES];
 }
@@ -125,8 +126,12 @@ void beginFrame()
 	// No C3D_FRAME_SYNCDRAW: that also waits for the next vblank, and the game already paces itself
 	// on its own retrace timer (vi.cpp). Waits only while the GPU still draws the previous frame.
 	C3D_FrameBegin(0);
-	s_tWait += svcGetSystemTick() - t0;
+	const u64 tw = svcGetSystemTick();
+	s_tWait += tw - t0;
 	storeWriteBacks();
+	const u64 twb = svcGetSystemTick();
+	g_gxCount[SMS3DS_CNT_WBUS] += (uint32_t)((twb - tw) / (SYSCLOCK_ARM11 / 1000000));
+	g_gxCount[SMS3DS_CNT_BEGINWAITUS] += (uint32_t)((tw - t0) / (SYSCLOCK_ARM11 / 1000000));
 	C3D_FrameDrawOn(s_target);
 	s_vertUsed = s_idxUsed = 0;
 	if (s_arenaFull) {
@@ -321,8 +326,10 @@ struct CopyTex {
 	// moved into `lin` by the GPU at the end of the copy, and encoded into `dest` next frame
 	uint8_t* lin = nullptr;
 	bool pending = false;
-	uint64_t storedHash = 0;  // of the tiles last encoded into `dest` (unchanged: not encoded again)
-	uint64_t ramHash = 0;     // of `dest` after the last write-back (ramKnown)
+	// compared byte for byte rather than hashed (64-bit hashing is slow on the ARM11: the goop map's
+	// two hashes and encode cost 4 ms a frame)
+	std::vector<uint8_t> stored;  // the tiles last encoded into `dest` (unchanged: not encoded again)
+	std::vector<uint8_t> ram;     // `dest` after the last write-back (ramKnown)
 	bool ramKnown = false;
 	const void* dest = nullptr;
 	uint32_t layout = 0, tw = 0, th = 0;
@@ -430,7 +437,7 @@ void copyToTexture(uint32_t ctrl)
 		c.rt = nullptr;
 		c.lin = nullptr;
 		c.pending = false;
-		c.storedHash = 0;
+		c.stored.clear();
 		c.ramKnown = false;
 	}
 	if (!c.rt) {
@@ -663,11 +670,14 @@ void presentPicture()
 	drawSideBars(stretch ? bar : g_efbBar);
 }
 
-std::vector<uint32_t> s_wbRgba;  // a write-back's copy texture untiled: GX row order, 0xAABBGGRR
+std::vector<uint32_t> s_wbRgba;
+std::vector<uint8_t> s_wbDirty;  // storeWriteBacks: changed tiles of the copy texture  // a write-back's copy texture untiled: GX row order, 0xAABBGGRR
 
 // A write-back (the copy texture's tiles in c.lin) encoded into `out` in the GX layout c.layout
 // (gx_texture.cpp copyLayout), resampled from the copy texture's size to the copy's.
-void encodeCopy(const CopyTex& c, uint8_t* out)
+// Only the GX tiles reading a changed 8x8 tile of the copy texture (bit per tile in `dirty`, tiles
+// in memory order) are encoded when `dirty` is given; the rest of `out` is left as it is.
+void encodeCopy(const CopyTex& c, uint8_t* out, const std::vector<uint8_t>* dirty = nullptr)
 {
 	const uint32_t L = c.layout, w = c.tw, h = c.th, pw = c.tex.width, ph = c.tex.height;
 	static const uint8_t kTw[7] = {8, 8, 8, 4, 4, 4, 4}, kTh[7] = {8, 4, 4, 4, 4, 4, 4};
@@ -687,6 +697,22 @@ void encodeCopy(const CopyTex& c, uint8_t* out)
 	std::vector<uint32_t> colOf(w);
 	for (uint32_t x = 0; x < w; x++)
 		colOf[x] = x * pw / w;
+	const uint32_t tilesX = pw >> 3;
+	// is any copy-texture tile under GX texels [x0, x0 + tileW) x [y0, y0 + tileH) dirty?
+	auto changed = [&](uint32_t x0, uint32_t y0) {
+		if (!dirty)
+			return true;
+		const uint32_t xa = colOf[x0 < w ? x0 : w - 1] >> 3, xb = colOf[x0 + tileW - 1 < w ? x0 + tileW - 1 : w - 1] >> 3;
+		const uint32_t ya = y0 < h ? y0 : h - 1, yb = y0 + tileH - 1 < h ? y0 + tileH - 1 : h - 1;
+		// GX row y is memory row ph - 1 - y * ph / h
+		const uint32_t ma = (ph - 1 - yb * ph / h) >> 3, mb = (ph - 1 - ya * ph / h) >> 3;
+		for (uint32_t my = ma; my <= mb; my++)
+			for (uint32_t mx = xa; mx <= xb; mx++)
+				if ((*dirty)[my * tilesX + mx])
+					return true;
+		return false;
+	};
+	const uint32_t tileBytes = L == 6 ? 64 : 32;
 	auto texel = [&](uint32_t x, uint32_t y, uint8_t* t) {  // r, g, b, a of GX texel (x, y)
 		if (x >= w || y >= h) {
 			memset(t, 0, 4);
@@ -700,6 +726,10 @@ void encodeCopy(const CopyTex& c, uint8_t* out)
 	for (uint32_t ty = 0; ty < rows; ty++)
 		for (uint32_t tx = 0; tx < cols; tx++) {
 			const uint32_t x0 = tx * tileW, y0 = ty * tileH;
+			if (!changed(x0, y0)) {
+				p += tileBytes;
+				continue;
+			}
 			switch (L) {
 			case 0:  // I4
 				for (uint32_t i = 0; i < 64; i += 2) {
@@ -771,18 +801,30 @@ void storeWriteBacks()
 		c.pending = false;
 		// the CPU changed RAM there after the copy (stamped and different from what was stored): on
 		// the GameCube its edit lands after the copy, so it wins, and RAM becomes the texture again
-		if (c.ramKnown && !unwrittenSince(c.dest, c.bytes, c.clock) && hashBytes(c.dest, c.bytes) != c.ramHash) {
+		if (c.ramKnown && !unwrittenSince(c.dest, c.bytes, c.clock) &&
+		    (c.ram.size() != c.bytes || memcmp(c.dest, c.ram.data(), c.bytes))) {
 			c.current = false;
 			c.ramKnown = false;
 			continue;
 		}
 		GSPGPU_InvalidateDataCache(c.lin, c.tex.size);
-		const uint64_t h = hashBytes(c.lin, c.tex.size);
-		if (h != c.storedHash || !c.ramKnown) {
-			c.storedHash = h;
-			encodeCopy(c, (uint8_t*)const_cast<void*>(c.dest));
+		// 8x8 tiles of the copy texture (256 bytes each) that differ from what was last encoded
+		const size_t tiles = c.tex.size / 256;
+		const bool all = !c.ramKnown || c.stored.size() != c.tex.size;
+		s_wbDirty.assign(tiles, all ? 1 : 0);
+		uint32_t nd = all ? (uint32_t)tiles : 0;
+		if (!all)
+			for (size_t i = 0; i < tiles; i++)
+				if (memcmp(&c.stored[i * 256], c.lin + i * 256, 256)) {
+					s_wbDirty[i] = 1;
+					nd++;
+				}
+		if (nd) {
+			c.stored.assign(c.lin, c.lin + c.tex.size);
+			encodeCopy(c, (uint8_t*)const_cast<void*>(c.dest), all ? nullptr : &s_wbDirty);
+			g_gxCount[SMS3DS_CNT_WBTILES] += nd;
+			c.ram.assign((const uint8_t*)c.dest, (const uint8_t*)c.dest + c.bytes);
 		}
-		c.ramHash = hashBytes(c.dest, c.bytes);
 		c.ramKnown = true;
 		c.clock = writeClock();
 	}
@@ -1030,7 +1072,7 @@ C3D_Tex* copyTexture(const void* ptr)
 		// pages there were flushed since; stamps are per page, so neighbours' flushes count too:
 		// when RAM still holds exactly what was written back, the copy stays the texture; one not
 		// written back (RAM never held it) stays the texture while the game keeps copying it
-		if (c.ramKnown ? hashBytes(ptr, c.bytes) == c.ramHash : !c.writesBack && g_displayFrames - c.frame <= 2)
+		if (c.ramKnown ? c.ram.size() == c.bytes && !memcmp(ptr, c.ram.data(), c.bytes) : !c.writesBack && g_displayFrames - c.frame <= 2)
 			c.clock = writeClock();
 		else
 			c.current = false;  // the CPU wrote there: RAM is the texture (kept for the next copy)
@@ -1220,6 +1262,7 @@ void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t 
 		if (!s_lastPixelValid || !(ps == s_lastPixel)) {
 			applyState();
 			setupTev(s_lastPlan, ps.w[kPixelWords - 1]);
+			g_gxCount[SMS3DS_CNT_PIXEL]++;
 			s_lastPixel = ps;
 			s_lastPixelValid = true;
 		}
@@ -1241,6 +1284,7 @@ void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t 
 		C3D_Tex* t = textureForMap(plan.map[u], plan.cmp[u]);
 		t->param = (t->param & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(u == 0 ? GPU_TEX_PROJECTION : GPU_TEX_2D);
 		C3D_TexBind(u, t);
+		g_gxCount[SMS3DS_CNT_TEXBIND]++;
 	}
 	const u64 tx2 = svcGetSystemTick();
 	s_tXform += tx1 - tx0;
@@ -1293,6 +1337,7 @@ bool arenaUpload(const uint8_t* verts, uint32_t count, uint32_t stride, const ui
 	out.baseVertex = (int32_t)s_arenaVertUsed;  // here: byte offset of the run's vertices
 	out.iOff = s_arenaIdxUsed;
 	s_arenaVertUsed += vbytes;
+	g_gxCount[SMS3DS_CNT_ARENAKB] += (uint32_t)(vbytes >> 10);
 	s_arenaIdxUsed += ibytes;
 	return true;
 }
@@ -1391,6 +1436,8 @@ void executeCopy(uint32_t ctrl)
 			sms3ds_prof_copy_ms = ticksMs(s_tCopy);
 			sms3ds_gx_fresh_verts = s_freshVerts;
 			sms3ds_gx_replay_verts = s_replayVerts;
+			for (int i = 0; i < SMS3DS_CNT_N; i++)
+				sms3ds_gx_count[i] = g_gxCount[i];
 		}
 		s_lastPresent = now;
 		s_decodeAtPresent = g_decodeSeconds;
@@ -1398,6 +1445,7 @@ void executeCopy(uint32_t ctrl)
 		memset(s_phaseTicks, 0, sizeof s_phaseTicks);
 		s_tReplay = s_tBegin = s_tState = s_tIdx = s_tDraw = s_tCopy = 0;
 		s_freshVerts = s_replayVerts = 0;
+		memset(g_gxCount, 0, sizeof g_gxCount);
 		sms3ds_gx_batches_per_frame = s_frameBatches;
 		sms3ds_gx_vertices_per_frame = s_frameVerts;
 		sms3ds_gx_approx_why = s_frameWhy;

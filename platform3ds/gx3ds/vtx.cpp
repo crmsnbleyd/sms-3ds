@@ -29,6 +29,7 @@ void setU(int loc, float x, float y, float z, float w)
 		return;
 	s[0] = x, s[1] = y, s[2] = z, s[3] = w;
 	s_shadowValid[loc] = true;
+	g_gxCount[SMS3DS_CNT_UNIF]++;
 	C3D_FVUnifSet(GPU_VERTEX_SHADER, loc, x, y, z, w);
 }
 void setU4(int loc, const float v[4]) { setU(loc, v[0], v[1], v[2], v[3]); }
@@ -174,6 +175,8 @@ void vtxInit(shaderProgram_s* prog)
 
 uint32_t g_vtxWhy;
 uint32_t g_xfMemVersion;
+uint32_t g_gxCount[SMS3DS_CNT_N];
+static_assert(SMS3DS_CNT_N == 8, "gx3ds.h g_gxCount");
 
 namespace {
 // What the previous vtxSetup depended on: when a batch repeats it (common for display-list runs of one
@@ -233,6 +236,7 @@ bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* ba
 	}
 	s_lastKey = key;
 	s_lastKeyValid = true;
+	g_gxCount[SMS3DS_CNT_VTXMISS]++;
 	s_lastOk = false;
 	s_lastWhy = 0;
 	bool approx = false;
