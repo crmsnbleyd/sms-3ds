@@ -41,7 +41,10 @@ See also `local/ENVIRONMENT.md` (gitignored: versions, commits, machine quirks) 
 - Touch nothing outside this repo except `/opt/devkitpro` (via devkitPro's tools) and, with approval, shell config.
 - On failure: stop and explain rather than improvising big workarounds.
 - The user's shell is **fish** (`~/.config/fish/conf.d/`), not zsh. Use **uv** for Python and **mise** for other toolchains rather than global installs.
-- Azahar (3DS emulator) is at `~/Downloads/azahar/Azahar.app`; the user launches builds in it themselves.
+- Azahar (3DS emulator) is at `~/Downloads/azahar/Azahar.app`. Claude may launch, drive and quit it with
+  `scripts/azahar.py` (approved 2026-10-22; uses Azahar's RPC server, enabled in its Debug settings): launch a
+  build, read the HUD's counters from memory, take screenshots (`local/shots/`), press buttons through the
+  build's remote pad. The user still judges how things look when it matters.
 - Machine-specific network and security-tooling quirks are in `local/` (gitignored); read `local/ENVIRONMENT.md` before
   installing or downloading anything. If devkitpro.org is unreachable, devkitPro's GitHub repos are the source of truth.
 - Never put machine- or employer-specific details in committed files; they go in `local/`.
@@ -61,6 +64,7 @@ docs/PORT-MAP.md        facts about sms-pc-port: platform modules, patches, 32/6
 scripts/check-env.sh    environment + hygiene check (read-only, idempotent)
 scripts/build-3ds.sh    configure + build build-3ds/sms_3ds.3dsx
 scripts/make-patch.sh   edit work/ copies of refs files, then diff them into patches/
+scripts/azahar.py       launch/drive the build in Azahar over its RPC server (hud, shot, pad, wait-area)
 work/                   gitignored; make-patch.sh working copies
 local/                  gitignored; machine-specific notes
   ENVIRONMENT.md        tool versions, repo commits, license notes, machine quirks, PC baseline commands

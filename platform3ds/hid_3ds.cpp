@@ -3,6 +3,11 @@
 
 #include <3ds.h>
 
+// Input from outside (scripts/azahar.py writes it through Azahar's RPC memory access): buttons are
+// added to the 3DS's, a non-zero stick replaces the circle pad / C-stick (3DS units, about +-156).
+extern "C" volatile Sms3dsHid sms3ds_remote_pad;
+volatile Sms3dsHid sms3ds_remote_pad;
+
 extern "C" void sms3ds_hid_read(Sms3dsHid* out)
 {
 	// The HUD thread calls hidScanInput() a few times a second; scan here too so the game sees
@@ -31,4 +36,15 @@ extern "C" void sms3ds_hid_read(Sms3dsHid* out)
 	out->stickY = cp.dy;
 	out->cstickX = cs.dx;
 	out->cstickY = cs.dy;
+	const Sms3dsHid r = {sms3ds_remote_pad.keys, sms3ds_remote_pad.stickX, sms3ds_remote_pad.stickY,
+	                     sms3ds_remote_pad.cstickX, sms3ds_remote_pad.cstickY};
+	out->keys |= r.keys;
+	if (r.stickX || r.stickY) {
+		out->stickX = r.stickX;
+		out->stickY = r.stickY;
+	}
+	if (r.cstickX || r.cstickY) {
+		out->cstickX = r.cstickX;
+		out->cstickY = r.cstickY;
+	}
 }
