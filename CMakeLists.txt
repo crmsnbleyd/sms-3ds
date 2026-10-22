@@ -182,7 +182,9 @@ else()
   ctr_add_shader_library(gx3ds_gx platform3ds/gx3ds/gx.v.pica)
   dkp_add_embedded_binary_library(gx3ds_shaders gx3ds_passthru gx3ds_gx)
 endif()
-add_library(sms_gx STATIC ${SMS_GX_FRONT_SOURCES} ${SMS_GX_GD_SOURCES} ${SMS_GX_BACKEND_SOURCES})
+# The GX thread (both backends): the front end and renderer on core 2, beside the game.
+add_library(sms_gx STATIC ${SMS_GX_FRONT_SOURCES} ${SMS_GX_GD_SOURCES} ${SMS_GX_BACKEND_SOURCES}
+  platform3ds/gx3ds/gxthread.cpp)
 if(TARGET gx3ds_shaders)
   target_link_libraries(sms_gx PRIVATE gx3ds_shaders)
 endif()

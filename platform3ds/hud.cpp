@@ -56,13 +56,9 @@ void drawBottom()
 	put("\x1b[6;1Hbeg%3.0f state%3.0f idx%3.0f dc%3.0f repl%3.0f ", (double)sms3ds_prof_begin_ms,
 	    (double)sms3ds_prof_state_ms, (double)sms3ds_prof_idx_ms, (double)sms3ds_prof_draw_ms,
 	    (double)sms3ds_prof_replay_ms);
-	{
-		const float* ph = (const float*)sms3ds_prof_phase_ms;
-		float own = ph[SMS3DS_PROF_DRAW] - sms3ds_prof_decode_ms - sms3ds_prof_flush_ms - sms3ds_prof_replay_ms;
-		float out = sms3ds_prof_frame_ms - ph[0] - ph[1] - ph[2] - ph[3];
-		put("\x1b[7;1Hdraw own %4.0f  outside phases %4.0f   ", (double)(own < 0 ? 0 : own),
-		    (double)(out < 0 ? 0 : out));
-	}
+	// the game thread's frame, its waits for the GX thread, and the GX thread's busy time
+	put("\x1b[7;1Hcpu %4.0f  gx wait %4.0f  gx busy %4.0f  ", (double)sms3ds_prof_cpu_ms,
+	    (double)sms3ds_prof_gxwait_ms, (double)sms3ds_prof_gxbusy_ms);
 	put("\x1b[8;1Hper frame  %5lu batches %7lu verts  ", (unsigned long)sms3ds_gx_batches_per_frame,
 	    (unsigned long)sms3ds_gx_vertices_per_frame);
 	put("\x1b[9;1Hcpu %5.1f ms  gpu %5.1f ms  drop %lu  ", (double)sms3ds_gx_cpu_ms, (double)sms3ds_gx_gpu_ms,

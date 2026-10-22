@@ -1,0 +1,205 @@
+--- a/platform/gx/src/gx_fifo.cpp
++++ b/platform/gx/src/gx_fifo.cpp
+@@ -16,6 +16,9 @@
+ #include <deque>
+ #include <map>
+ #include <unordered_map>
++#ifdef __3DS__
++extern u8* port_mem1_base;  // platform/port_runtime.cpp
++#endif
+ 
+ namespace gx {
+ 
+@@ -126,11 +129,19 @@
+ // The first 64 MiB from the memory window's base are tracked (MEM1); other
+ // memory always counts as written.
+ enum : uint32_t { kStampShift = 12, kStampPages = (64u << 20) >> kStampShift };
++#ifdef __3DS__
++// 3DS: the physical window is the identity (base 0: user addresses are below 0x40000000, so the
++// SDK's OSCachedToPhysical round-trips) and MEM1 is an ordinary heap block, so the stamps
++// measure from MEM1 rather than from the window's base.
++#define SMS_STAMP_BASE ::port_mem1_base
++#else
++#define SMS_STAMP_BASE s_memBase
++#endif
+ static std::atomic<uint32_t> s_pageStamp[kStampPages];
+ static std::atomic<uint32_t> s_writeClock{1};
+ 
+ void memoryWritten(const void* p, size_t n) {
+-    uintptr_t a = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(s_memBase);
++    uintptr_t a = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(SMS_STAMP_BASE);
+     const uintptr_t span = uintptr_t(kStampPages) << kStampShift;
+     if (!n || a >= span) return;
+     uintptr_t last = (std::min<uintptr_t>(a + n, span) - 1) >> kStampShift;
+@@ -154,7 +165,7 @@
+ // True when no page of [p, p + n) was stamped after `since` (a writeClock()
+ // value); false for memory outside the tracked range.
+ bool unwrittenSince(const void* p, size_t n, uint32_t since) {
+-    uintptr_t a = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(s_memBase);
++    uintptr_t a = reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(SMS_STAMP_BASE);
+     const uintptr_t span = uintptr_t(kStampPages) << kStampShift;
+     if (a >= span || a + n > span) return false;
+     if (!n) return true;
+@@ -894,6 +905,11 @@
+ 
+ // Executes complete commands from [p, p+n).  Returns bytes consumed; if the
+ // tail holds an incomplete command, *need receives its total length.
++#ifdef __3DS__
++// The GX thread's private records (gx_api.cpp, platform3ds/gx3ds/gxthread.cpp): 0xF0, kind, two
++// zero bytes, the payload's length (host order), the payload. Never in display lists.
++void gxqPrivate(uint8_t kind, const uint8_t* payload, uint32_t n);
++#endif
+ static uint32_t parse(const uint8_t* p, uint32_t n, uint32_t* need) {
+     const uint8_t* start = p;
+     const uint8_t* end = p + n;
+@@ -905,6 +921,17 @@
+             p++;
+             continue;
+         }
++#ifdef __3DS__
++        if (op == 0xF0) {
++            uint32_t plen = 0;
++            if (avail >= 8) memcpy(&plen, p + 4, 4);
++            len = 8 + plen;
++            if (avail < len) break;
++            gxqPrivate(p[1], p + 8, plen);
++            p += len;
++            continue;
++        }
++#endif
+         if (s_dlRec && !(op >= 0x80 && op < 0xC0)) s_dlRecFail = true;
+         if (op == 0x08) {
+             len = 6;
+@@ -975,6 +1002,13 @@
+         else if (op >= 0x20 && op <= 0x38) len = 5;
+         else if (op == 0x40) len = 9;
+         else if (op == 0x61) len = 5;
++#ifdef __3DS__
++        else if (op == 0xF0) {
++            uint32_t plen = 0;
++            if (avail >= 8) memcpy(&plen, p + 4, 4);
++            len = 8 + plen;
++        }
++#endif
+         else if (op >= 0x80 && op < 0xC0) {
+             if (avail < 3) len = 3;
+             else {
+@@ -1372,10 +1406,41 @@
+     if (!b) fatal("out of memory growing the write-gather pipe");
+     s_pipeBuf = b;
+     s_pipeCap = cap;
++    pipeFastUpdate();
++}
++
++#ifdef __3DS__
++// While the GX thread runs, the pipe collects the command stream (vertices from the game's inline
++// writers, and everything gx_api.cpp sends) and hands it over in chunks of about kStreamChunk bytes;
++// the GX thread parses it.
++bool s_async = false;
++enum { kStreamChunk = 16u << 10 };
++void gxqPush(const uint8_t* p, uint32_t n);  // platform3ds/gx3ds/gxthread.cpp
++bool gxAsync() { return s_async; }
++void pipeSetAsync(bool on) {
++    s_async = on;
++    s_pipeNeed = on ? kStreamChunk : 1;
++    pipeFastUpdate();
++}
++void pipePushAll() {
++    if (!s_async || !s_pipeLen) return;
++    gxqPush(s_pipeBuf, s_pipeLen);
++    s_pipeLen = 0;
+     pipeFastUpdate();
+ }
++uint32_t parseStream(const uint8_t* p, uint32_t n) {
++    uint32_t need = 0;
++    return parse(p, n, &need);
++}
++#endif
+ 
+ static void pipeRun() {
++#ifdef __3DS__
++    if (s_async) {
++        pipePushAll();
++        return;
++    }
++#endif
+     uint32_t need = 1;
+     uint32_t used = parse(s_pipeBuf, s_pipeLen, &need);
+     if (used == s_pipeLen) {
+@@ -1402,6 +1467,26 @@
+ }
+ 
+ void pipeWrite(const uint8_t* bytes, uint32_t n) { pipePut(bytes, n); }
++#ifdef __3DS__
++// Onto the command stream itself, also while the game writes a display list through a redirect.
++void pipeStream(const uint8_t* bytes, uint32_t n) {
++    if (s_pipeLen + n > s_pipeCap) pipeGrow(s_pipeLen + n);
++    memcpy(s_pipeBuf + s_pipeLen, bytes, n);
++    s_pipeLen += n;
++    if (s_pipeLen >= s_pipeNeed) pipeRun();
++}
++void streamPrivate(uint8_t kind, const void* a, uint32_t na, const void* b = nullptr, uint32_t nb = 0) {
++    uint8_t hdr[8] = {0xF0, kind, 0, 0};
++    uint32_t len = na + nb;
++    memcpy(hdr + 4, &len, 4);
++    if (s_pipeLen + 8 + len > s_pipeCap) pipeGrow(s_pipeLen + 8 + len);
++    memcpy(s_pipeBuf + s_pipeLen, hdr, 8);
++    if (na) memcpy(s_pipeBuf + s_pipeLen + 8, a, na);
++    if (nb) memcpy(s_pipeBuf + s_pipeLen + 8 + na, b, nb);
++    s_pipeLen += 8 + len;
++    if (s_pipeLen >= s_pipeNeed) pipeRun();
++}
++#endif
+ 
+ }  // namespace gx
+ 
+@@ -1417,7 +1502,25 @@
+ 
+ void GXPC_MemoryWritten(const void* p, uint32_t size) { memoryWritten(p, size); }
+ 
++#ifdef __3DS__
++extern "C++" {
++namespace gx {
++enum : uint8_t { PRIV_BE_ADD = 8, PRIV_BE_REMOVE, PRIV_ARRAY_BE, PRIV_DEFAULT_BE };
++bool gxqOnGxThread();  // platform3ds/gx3ds/gxthread.cpp
++}
++}
++// Called on the game's side while the GX thread runs: done there, in stream order.
++#define GX3DS_ON_GX_THREAD(kind, ...)                                     \
++    if (gx::gxAsync() && !gx::gxqOnGxThread()) {                          \
++        uint32_t a_[] = {__VA_ARGS__};                                    \
++        gx::streamPrivate(kind, a_, sizeof a_);                           \
++        return;                                                           \
++    }
++#else
++#define GX3DS_ON_GX_THREAD(kind, ...)
++#endif
+ void GXPC_AddBigEndianRange(const void* p, uint32_t size) {
++    GX3DS_ON_GX_THREAD(gx::PRIV_BE_ADD, uint32_t(reinterpret_cast<uintptr_t>(p)), size)
+     if (!p || !size) return;
+     uintptr_t a = reinterpret_cast<uintptr_t>(p);
+     s_beRanges[a] = a + size;
+@@ -1426,6 +1529,7 @@
+     s_beHitHi = 0;
+ }
+ void GXPC_RemoveBigEndianRange(const void* p) {
++    GX3DS_ON_GX_THREAD(gx::PRIV_BE_REMOVE, uint32_t(reinterpret_cast<uintptr_t>(p)))
+     s_beRanges.erase(reinterpret_cast<uintptr_t>(p));
+     s_beGen++;
+     s_beHitLo = 1;
+@@ -1435,6 +1539,7 @@
+ void* GXPC_PhysToPtr(uint32_t phys) { return physToPtr(phys); }
+ 
+ void GXPC_SetArrayBigEndian(int attr, int bigEndian) {
++    GX3DS_ON_GX_THREAD(gx::PRIV_ARRAY_BE, uint32_t(attr), uint32_t(bigEndian))
+     int slot;
+     if (attr == 25) slot = 1;           // GX_VA_NBT shares the normal array
+     else if (attr >= 9 && attr <= 24) slot = attr - 9;
+@@ -1443,6 +1548,7 @@
+     g_arrayGen++;
+ }
+ void GXPC_SetDefaultArrayBigEndian(int bigEndian) {
++    GX3DS_ON_GX_THREAD(gx::PRIV_DEFAULT_BE, uint32_t(bigEndian))
+     s_defaultArrayBE = bigEndian != 0;
+     for (int i = 0; i < 16; i++) g.arrayBigEndian[i] = s_defaultArrayBE;
+     g_arrayGen++;
