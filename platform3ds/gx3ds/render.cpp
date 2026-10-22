@@ -1131,7 +1131,9 @@ namespace {
 void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t nverts)
 {
 	const u64 ts = svcGetSystemTick();
-	if (!s_lastPixelValid || s_pixelVersion != s_stateVersion) {  // something was written since
+	// unchanged unless something was written since, or a map's EFB copy went stale (copyTexture
+	// decides that on use, without a state write)
+	if (!s_lastPixelValid || s_pixelVersion != s_stateVersion || copyMaps() != s_lastPixel.w[kPixelWords - 1]) {
 		PixelState ps;
 		snapshotPixel(ps);
 		if (!s_lastPixelValid || !(ps == s_lastPixel)) {
