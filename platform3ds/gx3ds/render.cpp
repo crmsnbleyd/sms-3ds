@@ -69,11 +69,23 @@ DVLB_s* s_dvlb;
 shaderProgram_s s_prog;  // side bars (passthru.v.pica)
 DVLB_s* s_gxDvlb;
 shaderProgram_s s_gxProg;  // the GX pipeline (gx.v.pica)
-// Per-frame rings in linear memory (the GPU reads them when the frame is submitted).
-const size_t kVertRing = 6u << 20, kIdxRing = 1u << 20;
+// Per-frame rings in linear memory (the GPU reads them when the frame is submitted): freshly decoded
+// vertices (cached display lists draw from the arena instead).
+const size_t kVertRing = 2u << 20, kIdxRing = 1u << 20;
 uint8_t* s_vertRing;
 uint8_t* s_idxRing;
 size_t s_vertUsed, s_idxUsed;
+// Display-list arena: the vertices and 16-bit indices of cached display-list runs (gx_fifo.cpp's DL
+// cache), uploaded once and drawn in place every frame. Filled by bumping; when full it starts over
+// at the next frame start (the GPU has finished the previous frame by then) under a new generation,
+// so runs upload again as they are drawn.
+size_t s_arenaVertCap, s_arenaIdxCap;
+uint8_t* s_arenaVerts;
+uint8_t* s_arenaIdx;
+size_t s_arenaVertUsed, s_arenaIdxUsed;
+uint32_t s_arenaGen = 1;
+bool s_arenaFull;
+uint32_t s_arenaResets;
 bool s_inFrame;
 bool s_clearPending = true;
 u32 s_clearColor = 0x000000FF, s_clearDepth = 0xFFFFFF;
@@ -111,6 +123,12 @@ void beginFrame()
 	storeWriteBacks();
 	C3D_FrameDrawOn(s_target);
 	s_vertUsed = s_idxUsed = 0;
+	if (s_arenaFull) {
+		s_arenaGen++;
+		s_arenaVertUsed = s_arenaIdxUsed = 0;
+		s_arenaFull = false;
+		s_arenaResets++;
+	}
 	if (s_clearPending) {
 		C3D_RenderTargetClear(s_target, C3D_CLEAR_ALL, s_clearColor, s_clearDepth);
 		s_clearPending = false;
@@ -945,12 +963,26 @@ void rendererInit(float)
 	vtxInit(&s_gxProg);
 	s_vertRing = (uint8_t*)linearAlloc(kVertRing);
 	s_idxRing = (uint8_t*)linearAlloc(kIdxRing);
+	for (size_t mb = 10; mb >= 4 && !s_arenaVerts; mb -= 2) {  // what linear memory allows
+		s_arenaVerts = (uint8_t*)linearAlloc(mb << 20);
+		s_arenaIdx = s_arenaVerts ? (uint8_t*)linearAlloc(mb << 18) : nullptr;
+		if (s_arenaVerts && !s_arenaIdx) {
+			linearFree(s_arenaVerts);
+			s_arenaVerts = nullptr;
+		}
+		if (s_arenaVerts) {
+			s_arenaVertCap = mb << 20;
+			s_arenaIdxCap = mb << 18;
+		}
+	}
 	s_efbTexOk = C3D_TexInitVRAM(&s_efbTex, 256, 512, GPU_RGBA8);
 	s_ready = s_target && s_vertRing && s_idxRing;
 	if (s_ready && s_efbTexOk)
 		calibrateCopies();
-	fprintf(stderr, "[gx3ds] citro3d %s: 400x240 RGBA8 target, %u KiB vertex ring, linear free %lu KiB, vram free %lu KiB\n",
-	        s_ready ? "ready" : "FAILED", (unsigned)(kVertRing >> 10), (unsigned long)(linearSpaceFree() >> 10),
+	fprintf(stderr, "[gx3ds] citro3d %s: 400x240 RGBA8 target, %u KiB vertex ring, %u KiB display-list arena, "
+	        "linear free %lu KiB, vram free %lu KiB\n",
+	        s_ready ? "ready" : "FAILED", (unsigned)(kVertRing >> 10), (unsigned)(s_arenaVertCap >> 10),
+	        (unsigned long)(linearSpaceFree() >> 10),
 	        (unsigned long)(vramSpaceFree() >> 10));
 }
 
@@ -1073,11 +1105,115 @@ void appendDecoded(PrimClass cls, uint32_t fmt, uint32_t stride, const uint8_t* 
 	s_tReplay += svcGetSystemTick() - t0 - (s_tFlush - f0);
 }
 
-// No display-list arena: cached runs come back through appendDecoded.
-bool arenaEnabled() { return false; }
-uint32_t arenaGeneration() { return 0; }
-bool arenaUpload(const uint8_t*, uint32_t, uint32_t, const uint32_t*, uint32_t, ArenaRef&) { return false; }
-void appendArena(PrimClass, uint32_t, uint32_t, const ArenaRef&, uint32_t, uint32_t, const uint8_t*) {}
+namespace {
+// Draws `nidx` indices at `idx` (GPU-readable) over vertices at `base` in the current batch format,
+// with the current GX state.
+void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t nverts)
+{
+	const u64 ts = svcGetSystemTick();
+	PixelState ps;
+	snapshotPixel(ps);
+	if (!s_lastPixelValid || !(ps == s_lastPixel)) {
+		applyState();
+		setupTev(s_lastPlan, ps.w[kPixelWords - 1]);
+		s_lastPixel = ps;
+		s_lastPixelValid = true;
+	}
+	const TevPlan& plan = s_lastPlan;
+	const u64 tx0 = svcGetSystemTick();
+	s_tState += tx0 - ts;
+	const bool ok = vtxSetup(plan, s_fmt, s_stride, base);
+	const uint32_t why = plan.why | g_vtxWhy;
+	if (why)
+		sms3ds_gx_tev_approx = sms3ds_gx_tev_approx + 1;
+	s_frameWhy |= why;
+	if (s_dump)
+		dumpBatch(plan, why);
+	const u64 tx1 = svcGetSystemTick();
+	for (int u = 0; u < plan.units; u++) {
+		// unit 0 divides its coordinates by texcoord0w (1 unless the texgen is projective, gx.v.pica)
+		C3D_Tex* t = textureForMap(plan.map[u], plan.cmp[u]);
+		t->param = (t->param & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(u == 0 ? GPU_TEX_PROJECTION : GPU_TEX_2D);
+		C3D_TexBind(u, t);
+	}
+	const u64 tx2 = svcGetSystemTick();
+	s_tXform += tx1 - tx0;
+	s_tTex += tx2 - tx1;
+	if (ok && ((g.bp[BP_GENMODE] >> 14) & 3) != 3) {
+		const u64 td = svcGetSystemTick();
+		C3D_DrawElements(GPU_TRIANGLES, (int)nidx, C3D_UNSIGNED_SHORT, idx);
+		s_tDraw += svcGetSystemTick() - td;
+		s_efbDirty = true;
+	}
+	else
+		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
+	s_frameBatches++;
+	s_frameVerts += nverts;
+}
+
+void endFlush(u64 tStart)
+{
+	const u64 t = svcGetSystemTick() - tStart;
+	s_tFlush += t;
+	g_flushSeconds += (double)t / SYSCLOCK_ARM11;  // gx_fifo.cpp takes flushes out of its decode time
+}
+}  // namespace
+
+bool arenaEnabled() { return s_arenaVerts != nullptr; }
+uint32_t arenaGeneration() { return s_arenaGen; }
+
+bool arenaUpload(const uint8_t* verts, uint32_t count, uint32_t stride, const uint32_t* idx, uint32_t nidx,
+                 ArenaRef& out)
+{
+	if (!s_arenaVerts || s_arenaFull || count > 65536)
+		return false;
+	const size_t vbytes = ((size_t)count * stride + 15) & ~(size_t)15;
+	const size_t ibytes = ((size_t)nidx * 2 + 15) & ~(size_t)15;
+	if (s_arenaVertUsed + vbytes > s_arenaVertCap || s_arenaIdxUsed + ibytes > s_arenaIdxCap) {
+		s_arenaFull = true;  // drawn by copying until the next frame starts the arena over
+		if (s_arenaResets < 3 || (s_arenaResets & 255) == 0)
+			fprintf(stderr, "[gx3ds] display-list arena full (%u KiB vertices), starting over (%lu times)\n",
+			        (unsigned)(s_arenaVertUsed >> 10), (unsigned long)s_arenaResets + 1);
+		return false;
+	}
+	uint8_t* v = s_arenaVerts + s_arenaVertUsed;
+	uint16_t* ix = (uint16_t*)(s_arenaIdx + s_arenaIdxUsed);
+	memcpy(v, verts, (size_t)count * stride);
+	for (uint32_t i = 0; i < nidx; i++)
+		ix[i] = (uint16_t)idx[i];
+	GSPGPU_FlushDataCache(v, vbytes);
+	GSPGPU_FlushDataCache(ix, ibytes);
+	out.gen = s_arenaGen;
+	out.baseVertex = (int32_t)s_arenaVertUsed;  // here: byte offset of the run's vertices
+	out.iOff = s_arenaIdxUsed;
+	s_arenaVertUsed += vbytes;
+	s_arenaIdxUsed += ibytes;
+	return true;
+}
+
+// A cached run drawn in place from the arena, as its own draw after the batch built so far.
+void appendArena(PrimClass cls, uint32_t fmt, uint32_t stride, const ArenaRef& ref, uint32_t count, uint32_t nidx,
+                 const uint8_t*)
+{
+	sms3ds_gx_primitives = sms3ds_gx_primitives + 1;
+	sms3ds_gx_vertices = sms3ds_gx_vertices + count;
+	s_replayVerts += count;
+	if (cls != PRIM_TRIS) {
+		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
+		return;
+	}
+	flushBatch();
+	const u64 tStart = svcGetSystemTick();
+	beginFrame();
+	s_tBegin += svcGetSystemTick() - tStart;
+	s_class = cls;
+	s_fmt = fmt;
+	s_stride = stride;
+	drawWith(s_arenaVerts + ref.baseVertex, (const uint16_t*)(s_arenaIdx + ref.iOff), nidx, count);
+	endFlush(tStart);
+}
+
+// Arena runs are drawn as they come, not kept in a batch.
 bool batchUsesArena() { return false; }
 
 void flushBatch()
@@ -1101,49 +1237,10 @@ void flushBatch()
 		oi[i] = (uint16_t)s_idx[i];
 	s_vertUsed = (size_t)(s_batch - s_vertRing) + ((vbytes + 15) & ~(size_t)15);
 	s_idxUsed += (ibytes + 15) & ~(size_t)15;
-	const u64 ts = svcGetSystemTick();
-	s_tIdx += ts - tb;
-
-	PixelState ps;
-	snapshotPixel(ps);
-	if (!s_lastPixelValid || !(ps == s_lastPixel)) {
-		applyState();
-		setupTev(s_lastPlan, ps.w[kPixelWords - 1]);
-		s_lastPixel = ps;
-		s_lastPixelValid = true;
-	}
-	const TevPlan& plan = s_lastPlan;
-	const u64 tx0 = svcGetSystemTick();
-	s_tState += tx0 - ts;
-	const bool ok = vtxSetup(plan, s_fmt, s_stride, s_batch);
-	const uint32_t why = plan.why | g_vtxWhy;
-	if (why)
-		sms3ds_gx_tev_approx = sms3ds_gx_tev_approx + 1;
-	s_frameWhy |= why;
-	if (s_dump)
-		dumpBatch(plan, why);
-	const u64 tx1 = svcGetSystemTick();
-	for (int u = 0; u < plan.units; u++) {
-		// unit 0 divides its coordinates by texcoord0w (1 unless the texgen is projective, gx.v.pica)
-		C3D_Tex* t = textureForMap(plan.map[u], plan.cmp[u]);
-		t->param = (t->param & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(u == 0 ? GPU_TEX_PROJECTION : GPU_TEX_2D);
-		C3D_TexBind(u, t);
-	}
-	const u64 tx2 = svcGetSystemTick();
-	s_tXform += tx1 - tx0;
-	s_tTex += tx2 - tx1;
-	if (ok && ((g.bp[BP_GENMODE] >> 14) & 3) != 3) {
-		const u64 td = svcGetSystemTick();
-		C3D_DrawElements(GPU_TRIANGLES, (int)s_idx.size(), C3D_UNSIGNED_SHORT, oi);
-		s_tDraw += svcGetSystemTick() - td;
-		s_efbDirty = true;
-	}
-	else
-		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
-	s_frameBatches++;
-	s_frameVerts += s_count;
+	s_tIdx += svcGetSystemTick() - tb;
+	drawWith(s_batch, oi, (uint32_t)s_idx.size(), s_count);
 	resetBatch();
-	s_tFlush += svcGetSystemTick() - tStart;
+	endFlush(tStart);
 }
 
 void executeCopy(uint32_t ctrl)
