@@ -115,6 +115,7 @@ void beginFrame()
 	if (s_inFrame)
 		return;
 	const u64 t0 = svcGetSystemTick();
+	const double flush0 = g_flushSeconds;
 	freeRetired();  // outside a frame (citro3d's rule); waits for the GPU to finish using them
 	// No C3D_FRAME_SYNCDRAW: that also waits for the next vblank, and the game already paces itself
 	// on its own retrace timer (vi.cpp). Waits only while the GPU still draws the previous frame.
@@ -135,6 +136,11 @@ void beginFrame()
 		s_efbDirty = true;
 	}
 	s_inFrame = true;
+	// counted as backend time wherever it is first reached (often the frame's first vertex decode)
+	const u64 t = svcGetSystemTick() - t0;
+	s_tBegin += t;
+	s_tFlush += t;
+	g_flushSeconds = flush0 + (double)t / SYSCLOCK_ARM11;
 }
 
 // GX copy-clear values (BP 0x4F-0x51) as citro3d wants them (RGBA8 0xRRGGBBAA, 24-bit depth).
@@ -548,9 +554,11 @@ void copyToTexture(uint32_t ctrl)
 	vtxInvalidate();
 	s_lastPixelValid = false;
 
-	// Write-back for copies the CPU may read: small ones (the sun's visibility check) and ones over
-	// memory the game wrote itself (the goop map, read by TPollutionLayer::isPolluted).
-	if (!s_calibrating && c.bytes && (c.bytes <= (64u << 10) || !unwrittenSince(dest, c.bytes, 0))) {
+	// Write-back for copies the CPU may read: small ones (the sun's visibility check) and the
+	// one-channel ones (the goop maps, GX_CTF_R8, read by TPollutionLayer::isPolluted). The large
+	// colour copies (the screen texture, the mirror) are only ever sampled by the GPU; encoding them
+	// on the CPU every frame cost more than 10 ms.
+	if (!s_calibrating && c.bytes && (c.bytes <= (64u << 10) || layout <= 1)) {
 		const size_t size = c.tex.size;
 		if (!c.lin)
 			c.lin = (uint8_t*)linearAlloc(size);
@@ -1203,9 +1211,8 @@ void appendArena(PrimClass cls, uint32_t fmt, uint32_t stride, const ArenaRef& r
 		return;
 	}
 	flushBatch();
-	const u64 tStart = svcGetSystemTick();
 	beginFrame();
-	s_tBegin += svcGetSystemTick() - tStart;
+	const u64 tStart = svcGetSystemTick();
 	s_class = cls;
 	s_fmt = fmt;
 	s_stride = stride;
@@ -1222,10 +1229,8 @@ void flushBatch()
 		resetBatch();
 		return;
 	}
-	const u64 tStart = svcGetSystemTick();
 	beginFrame();
-	const u64 tb = svcGetSystemTick();
-	s_tBegin += tb - tStart;
+	const u64 tStart = svcGetSystemTick(), tb = tStart;
 	const size_t vbytes = (size_t)s_count * s_stride, ibytes = s_idx.size() * sizeof(uint16_t);
 	if (s_idxUsed + ibytes > kIdxRing) {
 		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
