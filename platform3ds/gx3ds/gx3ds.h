@@ -79,7 +79,7 @@ void applyTev(const TevPlan& plan);
 // uniforms from the current XF state for the texture units in `plan`; false: cannot be drawn.
 void vtxInit(shaderProgram_s* prog);
 void vtxInvalidate();  // another program changed the vertex uniforms
-extern uint32_t g_gxCount[9];  // this frame's sms3ds_gx_count (sms3ds.h SMS3DS_CNT_N)
+extern uint32_t g_gxCount[10];  // this frame's sms3ds_gx_count (sms3ds.h SMS3DS_CNT_N)
 extern uint32_t g_xfMemVersion;  // bumped on every change to XF memory (markXfMemDirty)
 bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* base);
 extern uint32_t g_vtxWhy;  // AX_* approximations made by the last vtxSetup

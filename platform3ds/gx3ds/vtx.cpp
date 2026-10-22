@@ -94,10 +94,22 @@ void setFinal()
 	}
 }
 
+// XF memory rows 0-62 (position/normal/texture matrices) as uniforms: rows are compared as raw
+// words against what was last uploaded, so a matrix load costs only its own rows.
+uint32_t s_xfRaw[63 * 4];
+bool s_xfRawValid;
 void setXf()
 {
-	for (int r = 0; r < 63; r++)
+	const uint32_t* m = g.xfMem;
+	for (int r = 0; r < 63; r++) {
+		const uint32_t* a = m + 4 * r;
+		uint32_t* b = s_xfRaw + 4 * r;
+		if (s_xfRawValid && a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3])
+			continue;
+		memcpy(b, a, 16);
 		setU(u_xf + r, xmem(4 * r), xmem(4 * r + 1), xmem(4 * r + 2), xmem(4 * r + 3));
+	}
+	s_xfRawValid = true;
 }
 
 bool setLighting()
@@ -176,7 +188,7 @@ void vtxInit(shaderProgram_s* prog)
 uint32_t g_vtxWhy;
 uint32_t g_xfMemVersion;
 uint32_t g_gxCount[SMS3DS_CNT_N];
-static_assert(SMS3DS_CNT_N == 9, "gx3ds.h g_gxCount");
+static_assert(SMS3DS_CNT_N == 10, "gx3ds.h g_gxCount");
 
 namespace {
 // What the previous vtxSetup depended on: when a batch repeats it (common for display-list runs of one
@@ -218,6 +230,7 @@ void fillKey(SetupKey& k, const TevPlan& plan, uint32_t fmt, uint32_t stride)
 void vtxInvalidate()
 {
 	memset(s_shadowValid, 0, sizeof s_shadowValid);
+	s_xfRawValid = false;
 	s_lastKeyValid = false;
 }
 
@@ -225,6 +238,19 @@ bool vtxSetup(const TevPlan& plan, uint32_t fmt, uint32_t stride, const void* ba
 {
 	SetupKey key;
 	fillKey(key, plan, fmt, stride);
+	if (s_lastKeyValid && key.xfVersion != s_lastKey.xfVersion) {
+		// only XF memory changed (a matrix load between shapes, the usual case): its uniforms, the
+		// matrices and the lights (their approximations depend on the registers only)
+		s_lastKey.xfVersion = key.xfVersion;
+		if (key == s_lastKey) {
+			if (s_lastOk) {
+				setXf();
+				setLighting();
+				g_gxCount[SMS3DS_CNT_XFONLY]++;
+			} else
+				s_lastKey.xfVersion = ~key.xfVersion;  // not drawable anyway: full set-up next time
+		}
+	}
 	if (s_lastKeyValid && key == s_lastKey) {
 		if (s_lastOk) {
 			C3D_BufInfo* bi = C3D_GetBufInfo();
