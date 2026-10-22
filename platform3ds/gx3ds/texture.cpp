@@ -264,6 +264,10 @@ std::vector<uint8_t> s_rgba;
 size_t s_cacheBytes;
 const size_t kCacheBudget = 12u << 20;
 C3D_Tex s_white;
+// Unchanged textures are re-hashed this often (sms-pc-port: kRecheckFrames, 8). Writes the 3DS build
+// does not stamp are rare (DVD, ARAM DMA and the game's cache flushes all stamp), and hashing every
+// texture every 8 frames cost several ms a frame.
+const uint32_t kTexRecheckFrames = 120;
 bool s_whiteInit;
 
 void evictOld()
@@ -424,7 +428,7 @@ C3D_Tex* textureForMap(int map, const TexCmp& cmp)
 	const uint32_t bytes = levelBytes(fmt, w, h);
 	Entry& e = s_cache[key];
 	e.usedFrame = g_displayFrames;
-	bool check = !e.valid || g_displayFrames - e.checkedFrame >= kRecheckFrames ||
+	bool check = !e.valid || g_displayFrames - e.checkedFrame >= kTexRecheckFrames ||
 	             !unwrittenSince(ptr, bytes, e.checkedClock);
 	if (check) {
 		const uint64_t th = tlut ? hashBytes(tlut, fmt == 8 ? 32 : 512) : 0;

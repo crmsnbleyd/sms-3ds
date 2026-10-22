@@ -70,7 +70,7 @@ extern volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
 // of the flushes: frame start (incl. EFB-copy write-backs), pixel state, index conversion, draw calls;
 // vertices decoded by the vertex loader vs replayed from the display-list cache.
 extern volatile float sms3ds_prof_replay_ms, sms3ds_prof_begin_ms, sms3ds_prof_state_ms, sms3ds_prof_idx_ms,
-    sms3ds_prof_draw_ms;
+    sms3ds_prof_draw_ms, sms3ds_prof_copy_ms;  // copy: EFB texture copies (outside the flushes)
 extern volatile uint32_t sms3ds_gx_fresh_verts, sms3ds_gx_replay_verts;
 // gx3ds/gxthread.cpp, per game frame while the GX thread runs (else 0): the game thread's frame time,
 // its waits for the GX thread, and the GX thread's busy time (ms).

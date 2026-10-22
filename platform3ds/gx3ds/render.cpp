@@ -40,7 +40,7 @@ volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xform_ms,
     sms3ds_prof_wait_ms, sms3ds_prof_decode_ms;
 volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
 volatile float sms3ds_prof_replay_ms, sms3ds_prof_begin_ms, sms3ds_prof_state_ms, sms3ds_prof_idx_ms,
-    sms3ds_prof_draw_ms;
+    sms3ds_prof_draw_ms, sms3ds_prof_copy_ms;
 volatile uint32_t sms3ds_gx_fresh_verts, sms3ds_gx_replay_verts;
 namespace {
 u64 s_phaseStart[SMS3DS_PROF_PHASES], s_phaseTicks[SMS3DS_PROF_PHASES];
@@ -93,6 +93,9 @@ bool s_clearPending = true;
 u32 s_clearColor = 0x000000FF, s_clearDepth = 0xFFFFFF;
 uint32_t s_frameBatches, s_frameVerts;
 bool s_lastPixelValid;  // the pixel state set up for the previous batch still holds (flushBatch)
+// bumped by every state write (onStateChange) and new EFB copy: unchanged, the previous batch's pixel
+// state is known to hold without comparing a snapshot
+uint32_t s_stateVersion = 1, s_pixelVersion;
 uint32_t s_frameWhy;    // AX_* approximations made this frame
 bool s_efbDirty = true; // drawn or cleared since the last snapshot for a texture copy
 
@@ -100,7 +103,7 @@ bool s_efbDirty = true; // drawn or cleared since the last snapshot for a textur
 u64 s_tFlush, s_tXform, s_tTex, s_tWait, s_lastPresent;
 // finer split for the HUD: cached display-list runs copied in (outside flushes), write-backs and frame
 // start, pixel state (snapshot, blend/depth, TEV), index conversion, draw calls
-u64 s_tReplay, s_tBegin, s_tState, s_tIdx, s_tDraw;
+u64 s_tReplay, s_tBegin, s_tState, s_tIdx, s_tDraw, s_tCopy;  // copy: EFB texture copies
 uint32_t s_freshVerts, s_replayVerts;  // xform: vertex set-up (attributes, uniforms)
 double s_decodeAtPresent;
 inline float ticksMs(u64 t) { return (float)((double)t * 1000.0 / SYSCLOCK_ARM11); }
@@ -1000,7 +1003,11 @@ void rendererInit(float)
 }
 
 bool rendererReady() { return s_ready; }
-void onStateChange() { flushBatch(); }
+void onStateChange()
+{
+	s_stateVersion++;
+	flushBatch();
+}
 void markXfMemDirty() { g_xfMemVersion++; }
 
 PrimClass primClass(uint8_t op) { return op >= 0xB8 ? PRIM_POINTS : op >= 0xA8 ? PRIM_LINES : PRIM_TRIS; }
@@ -1124,13 +1131,16 @@ namespace {
 void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t nverts)
 {
 	const u64 ts = svcGetSystemTick();
-	PixelState ps;
-	snapshotPixel(ps);
-	if (!s_lastPixelValid || !(ps == s_lastPixel)) {
-		applyState();
-		setupTev(s_lastPlan, ps.w[kPixelWords - 1]);
-		s_lastPixel = ps;
-		s_lastPixelValid = true;
+	if (!s_lastPixelValid || s_pixelVersion != s_stateVersion) {  // something was written since
+		PixelState ps;
+		snapshotPixel(ps);
+		if (!s_lastPixelValid || !(ps == s_lastPixel)) {
+			applyState();
+			setupTev(s_lastPlan, ps.w[kPixelWords - 1]);
+			s_lastPixel = ps;
+			s_lastPixelValid = true;
+		}
+		s_pixelVersion = s_stateVersion;
 	}
 	const TevPlan& plan = s_lastPlan;
 	const u64 tx0 = svcGetSystemTick();
@@ -1256,6 +1266,7 @@ void flushBatch()
 void executeCopy(uint32_t ctrl)
 {
 	flushBatch();
+	s_stateVersion++;  // copyMaps() may change
 	const bool disp = (ctrl >> 14) & 1, clear = (ctrl >> 11) & 1;
 	if (disp) {
 		// the rows this display copy takes fill the screen from the next frame on
@@ -1298,6 +1309,7 @@ void executeCopy(uint32_t ctrl)
 			sms3ds_prof_state_ms = ticksMs(s_tState);
 			sms3ds_prof_idx_ms = ticksMs(s_tIdx);
 			sms3ds_prof_draw_ms = ticksMs(s_tDraw);
+			sms3ds_prof_copy_ms = ticksMs(s_tCopy);
 			sms3ds_gx_fresh_verts = s_freshVerts;
 			sms3ds_gx_replay_verts = s_replayVerts;
 		}
@@ -1305,7 +1317,7 @@ void executeCopy(uint32_t ctrl)
 		s_decodeAtPresent = g_decodeSeconds;
 		s_tFlush = s_tXform = s_tTex = s_tWait = 0;
 		memset(s_phaseTicks, 0, sizeof s_phaseTicks);
-		s_tReplay = s_tBegin = s_tState = s_tIdx = s_tDraw = 0;
+		s_tReplay = s_tBegin = s_tState = s_tIdx = s_tDraw = s_tCopy = 0;
 		s_freshVerts = s_replayVerts = 0;
 		sms3ds_gx_batches_per_frame = s_frameBatches;
 		sms3ds_gx_vertices_per_frame = s_frameVerts;
@@ -1334,12 +1346,14 @@ void executeCopy(uint32_t ctrl)
 	} else {
 		sms3ds_gx_copies = sms3ds_gx_copies + 1;
 		beginFrame();
+		const u64 t0 = svcGetSystemTick();
 		copyToTexture(ctrl);
 		if (clear) {
 			readClearValues();
 			clearCopyRect();
 			s_efbDirty = true;
 		}
+		s_tCopy += svcGetSystemTick() - t0;
 	}
 }
 

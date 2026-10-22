@@ -69,13 +69,15 @@ void drawBottom()
 	{
 		const float fr = sms3ds_prof_frame_ms, fl = sms3ds_prof_flush_ms, dc = sms3ds_prof_decode_ms,
 		            wt = sms3ds_prof_wait_ms;
-		float game = fr - fl - dc - wt;
-		if (game < 0.0f)
-			game = 0.0f;
+		// GX thread: what its busy time holds beside the flushes, decoding and copies (parsing, the
+		// display-list cache, private records)
+		float other = sms3ds_prof_gxbusy_ms - fl - dc - sms3ds_prof_copy_ms;
+		if (other < 0.0f)
+			other = 0.0f;
 		// ms per frame: render = backend flushes (xform = CPU transform, tex = texture work)
 		put("\x1b[13;1Hframe %4.0f render %4.0f xform %4.0f  ", (double)fr, (double)fl, (double)sms3ds_prof_xform_ms);
-		put("\x1b[14;1Htex %3.0f dec %4.0f wait %3.0f game %4.0f  ", (double)sms3ds_prof_tex_ms, (double)dc,
-		    (double)wt, (double)game);
+		put("\x1b[14;1Htex %3.0f dec %3.0f copy %3.0f other %4.0f  ", (double)sms3ds_prof_tex_ms, (double)dc,
+		    (double)sms3ds_prof_copy_ms, (double)other);
 	}
 	{
 		const struct mallinfo mi = mallinfo();
