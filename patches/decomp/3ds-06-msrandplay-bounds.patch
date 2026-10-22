@@ -1,0 +1,35 @@
+--- a/src/MSound/MSoundSE.cpp
++++ b/src/MSound/MSoundSE.cpp
+@@ -106,6 +106,15 @@
+ 
+ int MSRandPlay::registerTransDynamic(const Vec* trans)
+ {
++#ifdef __3DS__
++	// unchecked in retail: past the array it writes into the next heap block
++	if (!mRandPlayVecs || mRandPlayVecNum >= mRandPlayVecMax) {
++		static int s_logged;
++		if (s_logged++ < 4)
++			OSReport("[3ds] MSRandPlay %x: registerTrans past %u vectors\n", mSoundID, mRandPlayVecMax);
++		return -1;
++	}
++#endif
+ 	mRandPlayVecs[mRandPlayVecNum].mTrans = trans;
+ 	return mRandPlayVecNum++;
+ }
+@@ -167,6 +176,16 @@
+ // wait clamps change the code (96.9) and SMSGetMSound() names gpMSound.
+ void MSRandPlay::randPlay(u32 vec_idx)
+ {
++#ifdef __3DS__
++	// unchecked in retail: an index past the array (a bird manager whose birds outnumber the
++	// vectors the last manager made for this sound) writes state into the next heap block
++	if (!mRandPlayVecs || vec_idx >= mRandPlayVecMax) {
++		static int s_logged;
++		if (s_logged++ < 4)
++			OSReport("[3ds] MSRandPlay %x: vector %u of %u\n", mSoundID, vec_idx, mRandPlayVecMax);
++		return;
++	}
++#endif
+ 	MSRandPlayVec* vec = &mRandPlayVecs[vec_idx];
+ 
+ 	switch (vec->mState) {
