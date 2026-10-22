@@ -291,11 +291,11 @@ void drawClipRects(const float (*r)[4], int n, const uint8_t rgba[4], float z = 
 	s_lastPixelValid = false;
 }
 
-// The game clears the whole render target (citro3d has no partial clear), so the 4:3 picture's side
-// bars are painted black at the end of each frame.
-void drawSideBars()
+// The game clears the whole render target (citro3d has no partial clear), so the picture's side
+// bars (`bar` screen columns each) are painted black at the end of each frame.
+void drawSideBars(float bar)
 {
-	const float e = 2.0f * g_efbBar / kScreenW;
+	const float e = 2.0f * bar / kScreenW;
 	const float bars[2][4] = {{-1.0f, 1.0f, 1.0f - e, 1.0f}, {-1.0f, 1.0f, -1.0f, -1.0f + e}};
 	const uint8_t black[4] = {0, 0, 0, 255};
 	drawClipRects(bars, 2, black);
@@ -388,6 +388,26 @@ uint32_t copyLayout(uint32_t f, bool z)
 	}
 }
 
+// The frame so far laid out as a texture (s_efbTex), unless nothing was drawn since the last time.
+void snapshotEfb()
+{
+	if (!s_efbDirty)
+		return;
+	const u32 line = kScreenH * 8 * 4 / 16;  // one row of 8x8 RGBA8 tiles, in 16-byte units
+	C3D_SyncTextureCopy((u32*)s_target->frameBuf.colorBuf, GX_BUFFER_DIM(line, 0), (u32*)s_efbTex.data,
+	                    GX_BUFFER_DIM(line, (256 - kScreenH) * 8 * 4 / 16), kScreenH * kScreenW * 4,
+	                    GX_TRANSFER_RAW_COPY(1));
+	s_efbDirty = false;
+}
+
+// s_efbTex texture coordinates of EFB (ex, ey), as rendered (gx3ds.h) and laid out by snapshotEfb.
+void efbTexCoord(float ex, float ey, float tc[2])
+{
+	const float wx = kScreenH - (ey - g_efbTop) * g_efbScale, wy = (kScreenW - g_efbBar) - ex * g_efbScale;
+	tc[0] = wx / 256.0f;
+	tc[1] = (wy + (512.0f - kScreenW)) / 512.0f;
+}
+
 void copyToTexture(uint32_t ctrl)
 {
 	const void* dest = g.copyDest;
@@ -460,14 +480,7 @@ void copyToTexture(uint32_t ctrl)
 
 	if (s_vertUsed + 4 * sizeof(OutVertex) > kVertRing || s_idxUsed + 6 * sizeof(uint16_t) > kIdxRing)
 		return;
-	// the frame so far, laid out as a texture
-	if (s_efbDirty) {
-		const u32 line = kScreenH * 8 * 4 / 16;  // one row of 8x8 RGBA8 tiles, in 16-byte units
-		C3D_SyncTextureCopy((u32*)s_target->frameBuf.colorBuf, GX_BUFFER_DIM(line, 0), (u32*)s_efbTex.data,
-		                    GX_BUFFER_DIM(line, (256 - kScreenH) * 8 * 4 / 16), kScreenH * kScreenW * 4,
-		                    GX_TRANSFER_RAW_COPY(1));
-		s_efbDirty = false;
-	}
+	snapshotEfb();
 
 	OutVertex* v = (OutVertex*)(s_vertRing + s_vertUsed);
 	uint16_t* ix = (uint16_t*)(s_idxRing + s_idxUsed);
@@ -479,8 +492,6 @@ void copyToTexture(uint32_t ctrl)
 		if (s_copyFlipT)
 			ty = 1.0f - ty;
 		const float ex = x0 + sx * w, ey = y0 + ty * h;
-		// its framebuffer pixel (rotated: wx down the screen's height, wy across its width)
-		const float wx = kScreenH - (ey - g_efbTop) * g_efbScale, wy = (kScreenW - g_efbBar) - ex * g_efbScale;
 		OutVertex& o = v[i];
 		o.pos[0] = X;
 		o.pos[1] = Y;
@@ -488,8 +499,7 @@ void copyToTexture(uint32_t ctrl)
 		o.pos[3] = 1.0f;
 		memset(o.clr, 255, 4);
 		memset(o.tc, 0, sizeof o.tc);
-		o.tc[0][0] = wx / 256.0f;
-		o.tc[0][1] = (wy + (512.0f - kScreenW)) / 512.0f;
+		efbTexCoord(ex, ey, o.tc[0]);
 	}
 	const uint16_t q[6] = {0, 1, 2, 1, 3, 2};
 	memcpy(ix, q, sizeof q);
@@ -580,6 +590,77 @@ void copyToTexture(uint32_t ctrl)
 			c.th = th;
 		}
 	}
+}
+
+// The rows the display copy takes (GXSetDispCopySrc: 0-447 in game) fill the screen. Everything is
+// drawn at half the EFB's resolution (gx3ds.h), which keeps EFB copies exact (the goop map goes
+// through the EFB every frame and is only round at exactly 0.5); at the end of the frame the picture
+// is stretched from its 224 framebuffer lines to the screen's 240, keeping its shape between the
+// side bars.
+float s_dispTop = 0.0f, s_dispRows = 480.0f;
+
+void presentPicture()
+{
+	const float rows = s_dispRows, top = s_dispTop;
+	const float P = kScreenH / rows, bar = (kScreenW - 640.0f * P) * 0.5f;
+	const bool stretch = !(top == 0.0f && rows >= 480.0f);
+	if (stretch && s_vertUsed + 4 * sizeof(OutVertex) <= kVertRing && s_idxUsed + 6 * sizeof(uint16_t) <= kIdxRing) {
+		snapshotEfb();
+		OutVertex* v = (OutVertex*)(s_vertRing + s_vertUsed);
+		uint16_t* ix = (uint16_t*)(s_idxRing + s_idxUsed);
+		for (int i = 0; i < 4; i++) {
+			const float ex = (i & 1) ? 640.0f : 0.0f, ey = (i & 2) ? top + rows : top;
+			OutVertex& o = v[i];
+			o.pos[0] = 1.0f - 2.0f * P * (ey - top) / kScreenH;
+			o.pos[1] = 1.0f - 2.0f * (bar + ex * P) / kScreenW;
+			o.pos[2] = -0.5f;
+			o.pos[3] = 1.0f;
+			memset(o.clr, 255, 4);
+			memset(o.tc, 0, sizeof o.tc);
+			efbTexCoord(ex, ey, o.tc[0]);
+		}
+		const uint16_t q[6] = {0, 1, 2, 1, 3, 2};
+		memcpy(ix, q, sizeof q);
+		s_vertUsed += (4 * sizeof(OutVertex) + 15) & ~(size_t)15;
+		s_idxUsed += (6 * sizeof(uint16_t) + 15) & ~(size_t)15;
+
+		C3D_FrameDrawOn(s_target);
+		C3D_BindProgram(&s_prog);
+		C3D_AttrInfo* ai = C3D_GetAttrInfo();
+		AttrInfo_Init(ai);
+		AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
+		AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+		AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+		AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);
+		AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 2);
+		C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+		C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+		C3D_AlphaTest(false, GPU_ALWAYS, 0);
+		C3D_CullFace(GPU_CULL_NONE);
+		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+		C3D_TexSetFilter(&s_efbTex, GPU_LINEAR, GPU_LINEAR);
+		C3D_TexSetWrap(&s_efbTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+		C3D_TexBind(0, &s_efbTex);
+		for (int st = 0; st < 6; st++) {
+			C3D_TexEnv* e = C3D_GetTexEnv(st);
+			C3D_TexEnvInit(e);
+			if (st == 0) {
+				C3D_TexEnvSrc(e, C3D_Both, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0);
+				C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+			} else {
+				C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+				C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+			}
+		}
+		C3D_BufInfo* bi = C3D_GetBufInfo();
+		BufInfo_Init(bi);
+		BufInfo_Add(bi, v, sizeof(OutVertex), 5, 0x43210);
+		C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, ix);
+		C3D_BindProgram(&s_gxProg);
+		vtxInvalidate();
+		s_lastPixelValid = false;
+	}
+	drawSideBars(stretch ? bar : g_efbBar);
 }
 
 std::vector<uint32_t> s_wbRgba;  // a write-back's copy texture untiled: GX row order, 0xAABBGGRR
@@ -1271,23 +1352,19 @@ void executeCopy(uint32_t ctrl)
 	s_stateVersion++;  // copyMaps() may change
 	const bool disp = (ctrl >> 14) & 1, clear = (ctrl >> 11) & 1;
 	if (disp) {
-		// the rows this display copy takes fill the screen from the next frame on
-		const uint32_t tl = g.bp[BP_COPY_SRC_TL], wh = g.bp[BP_COPY_SRC_WH];
-		const float top = float((tl >> 10) & 0x3FF), rows = float(((wh >> 10) & 0x3FF) + 1);
-		const float scale = rows >= 64.0f ? kScreenH / rows : 0.5f;
-		if (scale != g_efbScale || top != g_efbTop) {
-			g_efbScale = scale;
-			g_efbTop = top;
-			g_efbBar = (kScreenW - 640.0f * scale) * 0.5f;
-			vtxInvalidate();  // setFinal follows the mapping
-			s_lastPixelValid = false;  // the scissor too
-			fprintf(stderr, "[gx3ds] picture: EFB rows %g-%g fill the screen (%.3f px per EFB px)\n", (double)top,
-			        (double)(top + rows), (double)scale);
+		// the rows this display copy takes: presentPicture fills the screen with them
+		{
+			const uint32_t tl = g.bp[BP_COPY_SRC_TL], wh = g.bp[BP_COPY_SRC_WH];
+			const float rows = float(((wh >> 10) & 0x3FF) + 1);
+			if (rows >= 64.0f) {
+				s_dispTop = float((tl >> 10) & 0x3FF);
+				s_dispRows = rows;
+			}
 		}
 		g_displayFrames++;
 		sms3ds_gx_frames = sms3ds_gx_frames + 1;
 		if (s_inFrame) {
-			drawSideBars();
+			presentPicture();  // also paints the side bars
 			// the CPU wrote this frame's vertices and indices through the data cache
 			GSPGPU_FlushDataCache(s_vertRing, s_vertUsed);
 			GSPGPU_FlushDataCache(s_idxRing, s_idxUsed);

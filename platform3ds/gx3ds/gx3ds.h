@@ -81,11 +81,11 @@ uint32_t gxTexBytes(uint32_t fmt, uint32_t w, uint32_t h);  // bytes of one GX t
 // render.cpp: the texture an EFB copy (GXCopyTex) last drew for destination `ptr`, or null.
 C3D_Tex* copyTexture(const void* ptr);
 
-// The GameCube picture, the rows of the EFB the display copy takes (GXSetDispCopySrc: 640 x 448 in
-// game, 640 x 480 before the first copy), fills the 240 lines of the 400 x 240 top screen; columns
-// scale alike, so the picture keeps its shape between black side bars. EFB row ey is screen row
-// (ey - g_efbTop) * g_efbScale, column ex is g_efbBar + ex * g_efbScale (render.cpp sets them at
-// each display copy; vtx.cpp setFinal, copies and clears follow them).
+// EFB pixels are drawn at half size into the 400 x 240 top screen, offset by 40 columns: EFB row ey
+// is screen row (ey - g_efbTop) * g_efbScale, column ex is g_efbBar + ex * g_efbScale (0, 0.5, 40).
+// Exactly half keeps EFB copies exact (the goop map goes through the EFB every frame). At the end of
+// a frame render.cpp presentPicture stretches the rows the display copy takes (0-447 in game) to fill
+// the screen's 240 lines. vtx.cpp setFinal, copies and clears follow this mapping.
 enum { kScreenW = 400, kScreenH = 240 };
 extern float g_efbScale, g_efbBar, g_efbTop;
 // PICA clip coordinates of EFB rows and columns (the framebuffer is rotated: clip x runs down the
