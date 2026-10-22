@@ -1,0 +1,53 @@
+--- a/libs/JSystem/src/JAudio/JALibrary/JALModSe.cpp
++++ b/libs/JSystem/src/JAudio/JALibrary/JALModSe.cpp
+@@ -392,6 +392,17 @@
+ 	} break;
+ 	}
+ }
++
++#ifdef __3DS__
++// Each category's flag array has the sound table's count for it; retail never checks indices. The
++// SMS_NO_AUDIO table declares one sound in all, so the boot-time appends (MSoundSE::construct) added
++// flags far past these arrays, into the heap (the MSRandPlay list among it: a wild pointer at the
++// title screen). Indices past an array are ignored.
++static u16 s_flagSize[16];
++#define FLAG_IN_RANGE(id) (((id) & JAISoundID_IndexMask) < s_flagSize[(u16)(id) >> 12])
++#else
++#define FLAG_IN_RANGE(id) true
++#endif
+ 
+ JALSystem::TFlagManager::TFlagManager()
+ {
+@@ -401,6 +412,9 @@
+ 	for (i = 0; i < 16; ++i) {
+ 		size    = JAIBasic::getInterface()->unk0->mSeTable.mSoundMax[i];
+ 		unk0[i] = new u16[size];
++#ifdef __3DS__
++		s_flagSize[i] = size;
++#endif
+ 		for (j = 0; j < size; ++j)
+ 			unk0[i][j] = 0;
+ 	}
+@@ -408,16 +422,22 @@
+ 
+ void JALSystem::TFlagManager::addUseFlag(u32 param_1, u16 param_2)
+ {
++	if (!FLAG_IN_RANGE(param_1))
++		return;
+ 	unk0[(u16)param_1 >> 12][param_1 & JAISoundID_IndexMask] += param_2;
+ }
+ 
+ u16 JALSystem::TFlagManager::getUseFlag(u32 param_1)
+ {
++	if (!FLAG_IN_RANGE(param_1))
++		return 0;
+ 	return unk0[(u16)param_1 >> 12][param_1 & JAISoundID_IndexMask];
+ }
+ 
+ bool JALSystem::TFlagManager::isRegistered(u32 param_1, u16 param_2)
+ {
++	if (!FLAG_IN_RANGE(param_1))
++		return false;
+ 	if (param_2 & unk0[(u16)param_1 >> 12][param_1 & JAISoundID_IndexMask])
+ 		return true;
+ 	return false;
