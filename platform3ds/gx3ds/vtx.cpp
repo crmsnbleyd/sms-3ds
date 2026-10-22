@@ -76,11 +76,12 @@ void setFinal()
 		P[3][3] = 1.0f;
 	}
 	const float vpx = vp[3] - 342.0f, vpy = vp[4] - 342.0f, S = 16777215.0f;
-	// clip (cx, cy, cz, cw) -> PICA (syn, -sxn, -Z, cw); see gx3ds.h for the letterbox
-	const float lb = 1.0f - 2.0f * kLetterbox / kScreenW;  // 0.8: the picture's half-width share
+	// clip (cx, cy, cz, cw) -> PICA (syn, -sxn, -Z, cw): EFB (vpx + xn vp0, vpy + yn vp1) through
+	// efbClipX/Y (gx3ds.h)
+	const float s = g_efbScale;
 	const float M[4][4] = {
-	    {0.0f, -vp[1] * 2.0f / (2.0f * kScreenH), 0.0f, 1.0f - vpy / kScreenH},
-	    {-vp[0] / kScreenW, 0.0f, 0.0f, lb - vpx / kScreenW},
+	    {0.0f, -2.0f * s * vp[1] / kScreenH, 0.0f, efbClipX(vpy)},
+	    {-2.0f * s * vp[0] / kScreenW, 0.0f, 0.0f, efbClipY(vpx)},
 	    {0.0f, 0.0f, -vp[2] / S, -vp[5] / S},
 	    {0.0f, 0.0f, 0.0f, 1.0f},
 	};

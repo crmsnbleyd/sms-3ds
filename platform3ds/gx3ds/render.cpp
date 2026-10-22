@@ -49,6 +49,8 @@ extern "C" void sms3ds_prof_begin(int phase) { s_phaseStart[phase] = svcGetSyste
 extern "C" void sms3ds_prof_end(int phase) { s_phaseTicks[phase] += svcGetSystemTick() - s_phaseStart[phase]; }
 
 namespace gx3ds {
+
+float g_efbScale = 0.5f, g_efbBar = 40.0f, g_efbTop = 0.0f;  // EFB -> top screen (gx3ds.h)
 namespace {
 
 using namespace gx;
@@ -165,9 +167,7 @@ void clearCopyRect()
 		C3D_RenderTargetClear(s_target, C3D_CLEAR_ALL, s_clearColor, s_clearDepth);
 		return;
 	}
-	// EFB (ex, ey) is clip (1 - ey / 240, 0.8 - ex / 400), as vtx.cpp setFinal maps it
-	const float lb = 1.0f - 2.0f * kLetterbox / kScreenW;
-	const float r[1][4] = {{1.0f - (y0 + h) / 240.0f, 1.0f - y0 / 240.0f, lb - (x0 + w) / 400.0f, lb - x0 / 400.0f}};
+	const float r[1][4] = {{efbClipX(y0 + h), efbClipX(y0), efbClipY(x0 + w), efbClipY(x0)}};
 	const uint8_t rgba[4] = {uint8_t(s_clearColor >> 24), uint8_t(s_clearColor >> 16), uint8_t(s_clearColor >> 8),
 	                         uint8_t(s_clearColor)};
 	drawClipRects(r, 1, rgba, -float(s_clearDepth) / 16777215.0f, true);
@@ -225,9 +225,10 @@ void applyState()
 	// inner faces of closed models and dropped the sky dome and 2D quads).
 	const uint32_t cull = (g.bp[BP_GENMODE] >> 14) & 3;
 	C3D_CullFace(cull == 1 ? GPU_CULL_FRONT_CCW : cull == 2 ? GPU_CULL_BACK_CCW : GPU_CULL_NONE);
-	// The picture is 4:3 in the middle of the 400-pixel width: keep draws out of the side bars.
+	// The picture is in the middle of the 400-pixel width: keep draws out of the side bars.
 	// Framebuffer coordinates are rotated (x along the screen's height, y along its width).
-	C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, kLetterbox, kScreenH, kScreenW - kLetterbox);
+	const u32 bar = (u32)(g_efbBar + 0.5f);
+	C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, bar, kScreenH, kScreenW - bar);
 }
 
 // Solid rectangles in PICA clip space ({x0, x1, y0, y1}; x along the screen's height, y along its
@@ -291,7 +292,7 @@ void drawClipRects(const float (*r)[4], int n, const uint8_t rgba[4], float z = 
 // bars are painted black at the end of each frame.
 void drawSideBars()
 {
-	const float e = 2.0f * kLetterbox / kScreenW;
+	const float e = 2.0f * g_efbBar / kScreenW;
 	const float bars[2][4] = {{-1.0f, 1.0f, 1.0f - e, 1.0f}, {-1.0f, 1.0f, -1.0f, -1.0f + e}};
 	const uint8_t black[4] = {0, 0, 0, 255};
 	drawClipRects(bars, 2, black);
@@ -475,7 +476,8 @@ void copyToTexture(uint32_t ctrl)
 		if (s_copyFlipT)
 			ty = 1.0f - ty;
 		const float ex = x0 + sx * w, ey = y0 + ty * h;
-		const float wx = kScreenH - ey * 0.5f, wy = (kScreenW - kLetterbox) - ex * 0.5f;
+		// its framebuffer pixel (rotated: wx down the screen's height, wy across its width)
+		const float wx = kScreenH - (ey - g_efbTop) * g_efbScale, wy = (kScreenW - g_efbBar) - ex * g_efbScale;
 		OutVertex& o = v[i];
 		o.pos[0] = X;
 		o.pos[1] = Y;
@@ -712,7 +714,7 @@ void calibrateCopies()
 	const uint32_t saved[3] = {g.bp[BP_COPY_SRC_TL], g.bp[BP_COPY_SRC_WH], g.bp[BP_PE_CONTROL]};
 	void* savedDest = g.copyDest;
 	beginFrame();  // clears to black
-	const float quad[1][4] = {{0.0f, 1.0f, 0.0f, 1.0f - 2.0f * kLetterbox / kScreenW}};  // EFB x < 320, y < 240
+	const float quad[1][4] = {{efbClipX(240.0f), efbClipX(0.0f), efbClipY(320.0f), efbClipY(0.0f)}};  // EFB x < 320, y < 240
 	const uint8_t red[4] = {255, 0, 0, 255};
 	drawClipRects(quad, 1, red);
 	s_efbDirty = true;
@@ -1256,6 +1258,19 @@ void executeCopy(uint32_t ctrl)
 	flushBatch();
 	const bool disp = (ctrl >> 14) & 1, clear = (ctrl >> 11) & 1;
 	if (disp) {
+		// the rows this display copy takes fill the screen from the next frame on
+		const uint32_t tl = g.bp[BP_COPY_SRC_TL], wh = g.bp[BP_COPY_SRC_WH];
+		const float top = float((tl >> 10) & 0x3FF), rows = float(((wh >> 10) & 0x3FF) + 1);
+		const float scale = rows >= 64.0f ? kScreenH / rows : 0.5f;
+		if (scale != g_efbScale || top != g_efbTop) {
+			g_efbScale = scale;
+			g_efbTop = top;
+			g_efbBar = (kScreenW - 640.0f * scale) * 0.5f;
+			vtxInvalidate();  // setFinal follows the mapping
+			s_lastPixelValid = false;  // the scissor too
+			fprintf(stderr, "[gx3ds] picture: EFB rows %g-%g fill the screen (%.3f px per EFB px)\n", (double)top,
+			        (double)(top + rows), (double)scale);
+		}
 		g_displayFrames++;
 		sms3ds_gx_frames = sms3ds_gx_frames + 1;
 		if (s_inFrame) {
