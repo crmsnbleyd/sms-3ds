@@ -312,6 +312,7 @@ struct CopyTex {
 	uint32_t clock = 0, bytes = 0;
 	uint32_t frame = 0;  // display frame of the last copy here
 	bool current = false;  // no CPU write to the destination since the copy
+	bool writesBack = false;  // RAM receives this copy (the CPU may read it)
 	// write-back to RAM (the game reads some copies on the CPU): the copy texture's tiles are
 	// moved into `lin` by the GPU at the end of the copy, and encoded into `dest` next frame
 	uint8_t* lin = nullptr;
@@ -558,7 +559,8 @@ void copyToTexture(uint32_t ctrl)
 	// one-channel ones (the goop maps, GX_CTF_R8, read by TPollutionLayer::isPolluted). The large
 	// colour copies (the screen texture, the mirror) are only ever sampled by the GPU; encoding them
 	// on the CPU every frame cost more than 10 ms.
-	if (!s_calibrating && c.bytes && (c.bytes <= (64u << 10) || layout <= 1)) {
+	c.writesBack = !s_calibrating && c.bytes && (c.bytes <= (64u << 10) || layout <= 1);
+	if (c.writesBack) {
 		const size_t size = c.tex.size;
 		if (!c.lin)
 			c.lin = (uint8_t*)linearAlloc(size);
@@ -940,8 +942,9 @@ C3D_Tex* copyTexture(const void* ptr)
 	CopyTex& c = it->second;
 	if (c.current && !unwrittenSince(ptr, c.bytes, c.clock)) {
 		// pages there were flushed since; stamps are per page, so neighbours' flushes count too:
-		// when RAM still holds exactly what was written back, the copy stays the texture
-		if (c.ramKnown && hashBytes(ptr, c.bytes) == c.ramHash)
+		// when RAM still holds exactly what was written back, the copy stays the texture; one not
+		// written back (RAM never held it) stays the texture while the game keeps copying it
+		if (c.ramKnown ? hashBytes(ptr, c.bytes) == c.ramHash : !c.writesBack && g_displayFrames - c.frame <= 2)
 			c.clock = writeClock();
 		else
 			c.current = false;  // the CPU wrote there: RAM is the texture (kept for the next copy)
@@ -971,7 +974,7 @@ void rendererInit(float)
 	vtxInit(&s_gxProg);
 	s_vertRing = (uint8_t*)linearAlloc(kVertRing);
 	s_idxRing = (uint8_t*)linearAlloc(kIdxRing);
-	for (size_t mb = 10; mb >= 4 && !s_arenaVerts; mb -= 2) {  // what linear memory allows
+	for (size_t mb = 16; mb >= 4 && !s_arenaVerts; mb -= 2) {  // what linear memory allows
 		s_arenaVerts = (uint8_t*)linearAlloc(mb << 20);
 		s_arenaIdx = s_arenaVerts ? (uint8_t*)linearAlloc(mb << 18) : nullptr;
 		if (s_arenaVerts && !s_arenaIdx) {
@@ -980,7 +983,7 @@ void rendererInit(float)
 		}
 		if (s_arenaVerts) {
 			s_arenaVertCap = mb << 20;
-			s_arenaIdxCap = mb << 18;
+			s_arenaIdxCap = mb << 18;  // up to ~6 bytes of 16-bit indices per vertex of ~50
 		}
 	}
 	s_efbTexOk = C3D_TexInitVRAM(&s_efbTex, 256, 512, GPU_RGBA8);

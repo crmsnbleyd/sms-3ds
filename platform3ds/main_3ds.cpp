@@ -21,6 +21,9 @@ extern "C" void GXPC_SetMemoryWindow(void* base, uint32_t size);
 // threads are host threads with their own stacks (os_thread.cpp).
 extern "C" {
 u32 __stacksize__ = 1024 * 1024;
+// Linear (GPU-readable) memory: 40 MiB instead of libctru's 32, for the renderer's display-list
+// arena (gx3ds/render.cpp) beside textures and copies; the regular heap gets the rest.
+u32 __ctru_linear_heap_size = 40u << 20;
 }
 
 static void setDefault(const char* name, const char* value)
