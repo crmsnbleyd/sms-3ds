@@ -26,6 +26,10 @@
 // HUD (sms3ds.h): per game frame, the game thread's frame time, its waits for the GX thread, and
 // the GX thread's busy time.
 volatile float sms3ds_prof_cpu_ms, sms3ds_prof_gxwait_ms, sms3ds_prof_gxbusy_ms;
+// GX thread, per game frame: GXCallDisplayList calls and their time outside flushes and vertex
+// decoding (the display-list cache's checks and replays), and the stream's size
+volatile float sms3ds_prof_dl_ms;
+volatile uint32_t sms3ds_gx_dl_calls, sms3ds_gx_stream_kb;
 
 namespace gx {
 void pipeSetAsync(bool on);  // gx_fifo.cpp (3ds-05-gx-fifo.patch)
@@ -33,6 +37,7 @@ void pipePushAll();
 uint32_t parseStream(const uint8_t* p, uint32_t n);
 bool gxAsync();
 extern void (*drawSyncCallback)(uint16_t);
+extern double g_flushSeconds, g_decodeSeconds;
 enum : uint8_t {  // private records (gx_api.cpp, gx_fifo.cpp)
 	PRIV_SIDE = 1, PRIV_CALLDL, PRIV_INVTEX, PRIV_ARRAY,
 	PRIV_BE_ADD = 8, PRIV_BE_REMOVE, PRIV_ARRAY_BE, PRIV_DEFAULT_BE,
@@ -69,6 +74,7 @@ std::atomic<uint32_t> s_pushed{0}, s_done{0};  // chunks sent / run
 std::atomic<bool> s_fenceWaiting{false};
 u64 s_waitTicks, s_lastBoundary;     // the game's side
 std::atomic<uint32_t> s_busyTicks{0};  // the GX thread's (ticks / 64, so a frame fits in 32 bits)
+std::atomic<uint32_t> s_dlTicks{0}, s_dlCalls{0}, s_streamBytes{0};  // the GX thread's, as above
 LightEvent s_doneEvent;
 std::vector<uint8_t> s_carry;  // the incomplete command at the end of the last chunk, and what follows
 uint32_t s_carryLen;
@@ -122,6 +128,7 @@ void gxThread(void*)
 		Slot& s = s_slots[s_r];
 		const u64 t0 = svcGetSystemTick();
 		runChunk(s.data, s.len);
+		s_streamBytes.fetch_add(s.len);
 		s_busyTicks.fetch_add(uint32_t((svcGetSystemTick() - t0) >> 6));
 		s_r = (s_r + 1) % kSlots;
 		LightSemaphore_Release(&s_free, 1);
@@ -226,6 +233,9 @@ void gxqFrameBoundary()
 		sms3ds_prof_cpu_ms = (float)((now - s_lastBoundary) * ms);
 		sms3ds_prof_gxwait_ms = (float)(s_waitTicks * ms);
 		sms3ds_prof_gxbusy_ms = (float)((u64)s_busyTicks.exchange(0) * 64 * ms);
+		sms3ds_prof_dl_ms = (float)((u64)s_dlTicks.exchange(0) * 64 * ms);
+		sms3ds_gx_dl_calls = s_dlCalls.exchange(0);
+		sms3ds_gx_stream_kb = s_streamBytes.exchange(0) >> 10;
 	}
 	s_lastBoundary = now;
 	s_waitTicks = 0;
@@ -282,9 +292,17 @@ void gxqPrivate(uint8_t kind, const uint8_t* payload, uint32_t n)
 		memcpy(dst, src, len);
 		break;
 	}
-	case PRIV_CALLDL:
+	case PRIV_CALLDL: {
+		const u64 t0 = svcGetSystemTick();
+		const double f0 = g_flushSeconds, d0 = g_decodeSeconds;
 		callDisplayList(reinterpret_cast<const uint8_t*>(uintptr_t(a[0])), a[1]);
+		const double inner = (g_flushSeconds - f0) + (g_decodeSeconds - d0);
+		const s64 t = (s64)(svcGetSystemTick() - t0) - (s64)(inner * SYSCLOCK_ARM11);
+		if (t > 0)
+			s_dlTicks.fetch_add(uint32_t(t >> 6));
+		s_dlCalls.fetch_add(1);
 		break;
+	}
 	case PRIV_INVTEX:
 		flushBatch();
 		textureInvalidateAll();

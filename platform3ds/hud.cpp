@@ -62,8 +62,8 @@ void drawBottom()
 	    (double)sms3ds_prof_gxwait_ms, (double)sms3ds_prof_gxbusy_ms);
 	put("\x1b[8;1Hper frame  %5lu batches %7lu verts  ", (unsigned long)sms3ds_gx_batches_per_frame,
 	    (unsigned long)sms3ds_gx_vertices_per_frame);
-	put("\x1b[9;1Hcpu %5.1f ms  gpu %5.1f ms  drop %lu  ", (double)sms3ds_gx_cpu_ms, (double)sms3ds_gx_gpu_ms,
-	    (unsigned long)sms3ds_gx_dropped);
+	put("\x1b[9;1Hdl %4lu calls %4.0f ms  stream %5lu KiB  ", (unsigned long)sms3ds_gx_dl_calls,
+	    (double)sms3ds_prof_dl_ms, (unsigned long)sms3ds_gx_stream_kb);
 	put("\x1b[10;1Happrox %9lu  why %05lx    ", (unsigned long)sms3ds_gx_tev_approx,
 	    (unsigned long)sms3ds_gx_approx_why);
 	{

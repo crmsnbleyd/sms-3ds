@@ -75,6 +75,9 @@ extern volatile uint32_t sms3ds_gx_fresh_verts, sms3ds_gx_replay_verts;
 // gx3ds/gxthread.cpp, per game frame while the GX thread runs (else 0): the game thread's frame time,
 // its waits for the GX thread, and the GX thread's busy time (ms).
 extern volatile float sms3ds_prof_cpu_ms, sms3ds_prof_gxwait_ms, sms3ds_prof_gxbusy_ms;
+// GX thread, per game frame: display-list calls and their own time (cache checks, replays), stream size
+extern volatile float sms3ds_prof_dl_ms;
+extern volatile uint32_t sms3ds_gx_dl_calls, sms3ds_gx_stream_kb;
 void sms3ds_prof_begin(int phase);
 void sms3ds_prof_end(int phase);
 
