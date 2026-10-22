@@ -1,0 +1,27 @@
+--- a/libs/JSystem/src/JAudio/JASystem/JASVload.cpp
++++ b/libs/JSystem/src/JAudio/JASystem/JASVload.cpp
+@@ -146,6 +146,12 @@
+ 	result = 0;
+ 
+ 	VLArcEntry* hndl = getRealHandle(param1);
++#ifdef __3DS__
++	// No archive under this handle (SMS_NO_AUDIO registers none: getArchiveHandle gave -1, so `hi`
++	// is 0xFFFF): retail would index vlDirName/vlArc far past their 16 entries. Nothing to load.
++	if (!hndl || hi >= vlCurrentArcs)
++		return 0;
++#endif
+ 
+ 	thing = hndl->unk18;
+ 	thing += param3;
+@@ -172,6 +178,11 @@
+ 	hi = param1 >> 0x10;
+ 
+ 	VLArcEntry* hndl = getRealHandle(param1);
++#ifdef __3DS__
++	// (as loadFile) the load never completes, so its callback never runs: the sound stays unloaded
++	if (!hndl || hi >= vlCurrentArcs)
++		return 0;
++#endif
+ 
+ 	thing = hndl->unk18;
+ 	thing += param3;

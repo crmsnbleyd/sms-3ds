@@ -1,0 +1,15 @@
+--- a/libs/JSystem/src/JAudio/JAInterface/JAIBasic.cpp
++++ b/libs/JSystem/src/JAudio/JAInterface/JAIBasic.cpp
+@@ -1376,6 +1376,12 @@
+ 
+ int JAIBasic::loadArcSeqData(u32 sound_id, bool param_2)
+ {
++#ifdef __3DS__
++	// No sequence archive (SMS_NO_AUDIO: the empty sound configuration has no archive header and
++	// the disc no JaiArcS.hed): nothing can load; fail as when the auto heap is full.
++	if (mSeqArchiveHandle == 0xffffffff)
++		return 0xffffffff;
++#endif
+ 	u32 uVar1   = sound_id & JAISoundID_IndexMask;
+ 	u32 uVar2   = JASystem::Vload::checkSize(uVar1);
+ 	void* iVar3 = unk0->checkOnMemory(uVar1, nullptr);
