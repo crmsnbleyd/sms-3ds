@@ -66,6 +66,12 @@ extern volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xf
 // A phase includes any other game thread that ran inside it.
 enum { SMS3DS_PROF_HIT, SMS3DS_PROF_MOVE, SMS3DS_PROF_ANIM, SMS3DS_PROF_DRAW, SMS3DS_PROF_MIX, SMS3DS_PROF_PHASES };
 extern volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
+// gx3ds/render.cpp, last frame: cached display-list runs copied into batches (ms, outside flushes);
+// of the flushes: frame start (incl. EFB-copy write-backs), pixel state, index conversion, draw calls;
+// vertices decoded by the vertex loader vs replayed from the display-list cache.
+extern volatile float sms3ds_prof_replay_ms, sms3ds_prof_begin_ms, sms3ds_prof_state_ms, sms3ds_prof_idx_ms,
+    sms3ds_prof_draw_ms;
+extern volatile uint32_t sms3ds_gx_fresh_verts, sms3ds_gx_replay_verts;
 void sms3ds_prof_begin(int phase);
 void sms3ds_prof_end(int phase);
 

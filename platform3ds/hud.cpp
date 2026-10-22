@@ -49,9 +49,20 @@ void drawBottom()
 	put("\x1b[1;1H\x1b[7m sms-3ds  phase 2                        \x1b[0m");
 	put("\x1b[3;1Huptime     %6llu.%01llu s", ms / 1000, (ms / 100) % 10);
 	put("\x1b[4;1Hframes     %10lu", (unsigned long)sms3ds_gx_frames);
-	put("\x1b[5;1Hcopies     %10lu", (unsigned long)sms3ds_gx_copies);
-	put("\x1b[6;1Hprimitives %10lu", (unsigned long)sms3ds_gx_primitives);
-	put("\x1b[7;1Hvertices   %10lu", (unsigned long)sms3ds_gx_vertices);
+	// last frame: vertices decoded vs replayed from the display-list cache; the flushes' parts; the
+	// game's own drawing (draw phase less GX decoding, flushes and replays) and time outside the phases
+	put("\x1b[5;1Hfresh %7lu verts replay %7lu   ", (unsigned long)sms3ds_gx_fresh_verts,
+	    (unsigned long)sms3ds_gx_replay_verts);
+	put("\x1b[6;1Hbeg%3.0f state%3.0f idx%3.0f dc%3.0f repl%3.0f ", (double)sms3ds_prof_begin_ms,
+	    (double)sms3ds_prof_state_ms, (double)sms3ds_prof_idx_ms, (double)sms3ds_prof_draw_ms,
+	    (double)sms3ds_prof_replay_ms);
+	{
+		const float* ph = (const float*)sms3ds_prof_phase_ms;
+		float own = ph[SMS3DS_PROF_DRAW] - sms3ds_prof_decode_ms - sms3ds_prof_flush_ms - sms3ds_prof_replay_ms;
+		float out = sms3ds_prof_frame_ms - ph[0] - ph[1] - ph[2] - ph[3];
+		put("\x1b[7;1Hdraw own %4.0f  outside phases %4.0f   ", (double)(own < 0 ? 0 : own),
+		    (double)(out < 0 ? 0 : out));
+	}
 	put("\x1b[8;1Hper frame  %5lu batches %7lu verts  ", (unsigned long)sms3ds_gx_batches_per_frame,
 	    (unsigned long)sms3ds_gx_vertices_per_frame);
 	put("\x1b[9;1Hcpu %5.1f ms  gpu %5.1f ms  drop %lu  ", (double)sms3ds_gx_cpu_ms, (double)sms3ds_gx_gpu_ms,

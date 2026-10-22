@@ -39,6 +39,9 @@ volatile uint32_t sms3ds_gx_tev_approx, sms3ds_gx_approx_why, sms3ds_gx_dump_req
 volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xform_ms, sms3ds_prof_tex_ms,
     sms3ds_prof_wait_ms, sms3ds_prof_decode_ms;
 volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
+volatile float sms3ds_prof_replay_ms, sms3ds_prof_begin_ms, sms3ds_prof_state_ms, sms3ds_prof_idx_ms,
+    sms3ds_prof_draw_ms;
+volatile uint32_t sms3ds_gx_fresh_verts, sms3ds_gx_replay_verts;
 namespace {
 u64 s_phaseStart[SMS3DS_PROF_PHASES], s_phaseTicks[SMS3DS_PROF_PHASES];
 }
@@ -80,7 +83,11 @@ uint32_t s_frameWhy;    // AX_* approximations made this frame
 bool s_efbDirty = true; // drawn or cleared since the last snapshot for a texture copy
 
 // Per-frame profile (system ticks, 268 MHz), published to the HUD at each display copy.
-u64 s_tFlush, s_tXform, s_tTex, s_tWait, s_lastPresent;  // xform: vertex set-up (attributes, uniforms)
+u64 s_tFlush, s_tXform, s_tTex, s_tWait, s_lastPresent;
+// finer split for the HUD: cached display-list runs copied in (outside flushes), write-backs and frame
+// start, pixel state (snapshot, blend/depth, TEV), index conversion, draw calls
+u64 s_tReplay, s_tBegin, s_tState, s_tIdx, s_tDraw;
+uint32_t s_freshVerts, s_replayVerts;  // xform: vertex set-up (attributes, uniforms)
 double s_decodeAtPresent;
 inline float ticksMs(u64 t) { return (float)((double)t * 1000.0 / SYSCLOCK_ARM11); }
 
@@ -955,6 +962,7 @@ PrimClass primClass(uint8_t op) { return op >= 0xB8 ? PRIM_POINTS : op >= 0xA8 ?
 
 uint8_t* primitiveBegin(uint8_t op, uint32_t n, uint32_t fmt, uint32_t stride)
 {
+	s_freshVerts += n;
 	PrimClass cls = primClass(op);
 	if (s_count && (cls != s_class || fmt != s_fmt || s_count + n > 65535))
 		flushBatch();
@@ -1050,16 +1058,19 @@ void appendDecoded(PrimClass cls, uint32_t fmt, uint32_t stride, const uint8_t* 
 		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
 		return;
 	}
+	const u64 t0 = svcGetSystemTick(), f0 = s_tFlush;
+	s_replayVerts += count;
 	s_class = cls;
 	s_fmt = fmt;
 	s_stride = stride;
 	uint8_t* room = batchRoom(count, stride);
-	if (!room)
-		return;
-	memcpy(room, verts, (size_t)count * stride);
-	for (uint32_t i = 0; i < nidx; i++)
-		s_idx.push_back(s_count + idx[i]);
-	s_count += count;
+	if (room) {
+		memcpy(room, verts, (size_t)count * stride);
+		for (uint32_t i = 0; i < nidx; i++)
+			s_idx.push_back(s_count + idx[i]);
+		s_count += count;
+	}
+	s_tReplay += svcGetSystemTick() - t0 - (s_tFlush - f0);
 }
 
 // No display-list arena: cached runs come back through appendDecoded.
@@ -1077,6 +1088,8 @@ void flushBatch()
 	}
 	const u64 tStart = svcGetSystemTick();
 	beginFrame();
+	const u64 tb = svcGetSystemTick();
+	s_tBegin += tb - tStart;
 	const size_t vbytes = (size_t)s_count * s_stride, ibytes = s_idx.size() * sizeof(uint16_t);
 	if (s_idxUsed + ibytes > kIdxRing) {
 		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
@@ -1088,6 +1101,8 @@ void flushBatch()
 		oi[i] = (uint16_t)s_idx[i];
 	s_vertUsed = (size_t)(s_batch - s_vertRing) + ((vbytes + 15) & ~(size_t)15);
 	s_idxUsed += (ibytes + 15) & ~(size_t)15;
+	const u64 ts = svcGetSystemTick();
+	s_tIdx += ts - tb;
 
 	PixelState ps;
 	snapshotPixel(ps);
@@ -1099,6 +1114,7 @@ void flushBatch()
 	}
 	const TevPlan& plan = s_lastPlan;
 	const u64 tx0 = svcGetSystemTick();
+	s_tState += tx0 - ts;
 	const bool ok = vtxSetup(plan, s_fmt, s_stride, s_batch);
 	const uint32_t why = plan.why | g_vtxWhy;
 	if (why)
@@ -1117,7 +1133,9 @@ void flushBatch()
 	s_tXform += tx1 - tx0;
 	s_tTex += tx2 - tx1;
 	if (ok && ((g.bp[BP_GENMODE] >> 14) & 3) != 3) {
+		const u64 td = svcGetSystemTick();
 		C3D_DrawElements(GPU_TRIANGLES, (int)s_idx.size(), C3D_UNSIGNED_SHORT, oi);
+		s_tDraw += svcGetSystemTick() - td;
 		s_efbDirty = true;
 	}
 	else
@@ -1155,11 +1173,20 @@ void executeCopy(uint32_t ctrl)
 			sms3ds_prof_decode_ms = (float)((g_decodeSeconds - s_decodeAtPresent) * 1000.0);
 			for (int i = 0; i < SMS3DS_PROF_PHASES; i++)
 				sms3ds_prof_phase_ms[i] = ticksMs(s_phaseTicks[i]);
+			sms3ds_prof_replay_ms = ticksMs(s_tReplay);
+			sms3ds_prof_begin_ms = ticksMs(s_tBegin);
+			sms3ds_prof_state_ms = ticksMs(s_tState);
+			sms3ds_prof_idx_ms = ticksMs(s_tIdx);
+			sms3ds_prof_draw_ms = ticksMs(s_tDraw);
+			sms3ds_gx_fresh_verts = s_freshVerts;
+			sms3ds_gx_replay_verts = s_replayVerts;
 		}
 		s_lastPresent = now;
 		s_decodeAtPresent = g_decodeSeconds;
 		s_tFlush = s_tXform = s_tTex = s_tWait = 0;
 		memset(s_phaseTicks, 0, sizeof s_phaseTicks);
+		s_tReplay = s_tBegin = s_tState = s_tIdx = s_tDraw = 0;
+		s_freshVerts = s_replayVerts = 0;
 		sms3ds_gx_batches_per_frame = s_frameBatches;
 		sms3ds_gx_vertices_per_frame = s_frameVerts;
 		sms3ds_gx_approx_why = s_frameWhy;
