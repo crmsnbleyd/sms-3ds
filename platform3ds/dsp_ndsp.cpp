@@ -94,8 +94,9 @@ const float kDacRate = 32028.5f;                        // JASRate.cpp
 // --- ndsp channels ---------------------------------------------------------------------------------
 enum {
 	kChannels = 24,
-	kBufs = 8,            // queued buffers per channel: room for the game's audio catching up in a burst
-	kSubPerBuf = 7,       // subframes per buffer: one JAudio frame
+	kBufs = 24,           // queued buffers per channel: room for the game's audio catching up in a burst
+	                      // (a voice whose pitch moves every subframe submits a buffer per subframe)
+	kSubPerBuf = 7,       // subframes per buffer at most: one JAudio frame
 	kBufSamples = 2048,   // 7 x 80 up to a ratio of 3.6; higher pitches submit after fewer subframes
 };
 struct Chan {
@@ -118,6 +119,15 @@ struct Decoder {
 	uint32_t remaining, written;
 	int chan;          // ndsp channel, or -1
 	int quietSubs;     // subframes in a row with no volume (the channel is given up after a while)
+	// A buffer plays at one rate and one channel mix, but the game changes a voice's pitch (vibrato,
+	// slides) and volume (envelopes, fades) every subframe. The staged samples keep the pitch they
+	// were consumed at (a change starts a new buffer), and their volume is ramped per sample from
+	// subframe to subframe here; the channel's mix holds the buffer's peak volume and the pan.
+	uint16_t bufRatio;      // the pitch of the staged samples
+	float prevGain;         // the total gain at the end of the last buffer (the next ramps from it)
+	float pan;              // left share of the total gain, as last audible
+	uint32_t subEnd[kSubPerBuf];  // staged samples at the end of each staged subframe
+	float subGain[kSubPerBuf];    // and the voice's total gain (left + right) there
 	int16_t stage[kBufSamples];
 	uint32_t staged;   // samples in stage
 	uint32_t stagedSubs;
@@ -418,21 +428,28 @@ int takeChan(int vi, float loudness)
 	return pick;
 }
 
-// Queues the decoded samples of voice `vi` on its channel (taking one when it has volume).
+// Queues the decoded samples of voice `vi` on its channel (taking one when it has volume), their
+// volume ramped from subframe to subframe (Decoder).
 void submit(int vi, const Voice& v)
 {
 	Decoder& d = g.dec[vi];
-	const uint32_t n = d.staged;
+	const uint32_t n = d.staged, subs = d.stagedSubs;
 	d.staged = d.stagedSubs = 0;
-	if (!n || !g.ndspOk)
+	if (!n || !subs || !g.ndspOk)
 		return;
-	const bool audible = d.gainL > 0.0f || d.gainR > 0.0f;
+	float peak = d.prevGain;
+	for (uint32_t k = 0; k < subs; k++)
+		peak = d.subGain[k] > peak ? d.subGain[k] : peak;
+	const float endGain = d.subGain[subs - 1];
+	if (peak <= 0.0f) {
+		d.prevGain = endGain;
+		return;
+	}
 	if (d.chan < 0) {
-		if (!audible)
-			return;
-		d.chan = takeChan(vi, d.gainL + d.gainR);
+		d.chan = takeChan(vi, peak);
 		if (d.chan < 0) {
 			g.unassigned++;
+			d.prevGain = endGain;
 			return;
 		}
 	}
@@ -440,25 +457,43 @@ void submit(int vi, const Voice& v)
 	ndspWaveBuf& wb = ch.wb[ch.next];
 	if (wb.status == NDSP_WBUF_QUEUED || wb.status == NDSP_WBUF_PLAYING || s_npending == 64) {
 		g.overruns++;  // the DSP is that far behind: drop rather than wait
+		d.prevGain = endGain;
 		return;
 	}
 	int16_t* dst = ringTake(n);
-	memcpy(dst, d.stage, n * sizeof(int16_t));
+	const float inv = 1.0f / peak;
+	uint32_t at = 0;
+	float g0 = d.prevGain;
+	for (uint32_t k = 0; k < subs; k++) {
+		const uint32_t end = d.subEnd[k] < n ? d.subEnd[k] : n;
+		const float g1 = d.subGain[k];
+		if (end > at) {
+			const float step = (g1 - g0) * inv / float(end - at);
+			float f = g0 * inv;
+			for (; at < end; at++) {
+				f += step;
+				dst[at] = (int16_t)((float)d.stage[at] * f);
+			}
+		}
+		g0 = g1;
+	}
+	d.prevGain = endGain;
 	memset(&wb, 0, sizeof wb);
 	wb.data_pcm16 = dst;
 	wb.nsamples = n;
 	wb.looping = false;
-	const float rate = is_oscillator(v.sourceType) ? kDacRate : kDacRate * (float)v.ratio / 4096.0f;
+	const float rate = is_oscillator(v.sourceType) ? kDacRate : kDacRate * (float)d.bufRatio / 4096.0f;
 	if (rate != ch.rate) {
 		ch.rate = rate;
 		ndspChnSetRate(d.chan, rate);
 	}
-	if (d.gainL != ch.mixL || d.gainR != ch.mixR) {
-		ch.mixL = d.gainL;
-		ch.mixR = d.gainR;
+	const float mixL = peak * d.pan, mixR = peak * (1.0f - d.pan);
+	if (mixL != ch.mixL || mixR != ch.mixR) {
+		ch.mixL = mixL;
+		ch.mixR = mixR;
 		float mix[12] = {};
-		mix[0] = d.gainL;
-		mix[1] = d.gainR;
+		mix[0] = mixL;
+		mix[1] = mixR;
 		ndspChnSetMix(d.chan, mix);
 	}
 	s_pending[s_npending++] = Pending{d.chan, ch.gen, &wb};
@@ -533,6 +568,14 @@ void render_voice(int vi, int n, float master)
 	}
 	d.gainL = gl > 0.0f ? gl * master : 0.0f;
 	d.gainR = gr > 0.0f ? gr * master : 0.0f;
+	// a buffer plays at one rate: a pitch change of more than ~0.1% starts the next one
+	if (!is_oscillator(v.sourceType) && d.stagedSubs) {
+		const uint32_t a = v.ratio, b = d.bufRatio, diff = a > b ? a - b : b - a;
+		if (diff * 1024 > b)
+			submit(vi, v);
+	}
+	if (!d.stagedSubs)
+		d.bufRatio = v.ratio;
 
 	// the source samples this subframe consumes (the DSP steps ratio << 4 in 16.16 per output sample),
 	// or n synthesised ones for an oscillator (not resampled)
@@ -568,6 +611,11 @@ void render_voice(int vi, int n, float master)
 				d.stage[d.staged++] = (int16_t)s;
 		}
 	}
+	const float total = d.gainL + d.gainR;
+	if (total > 0.0f)
+		d.pan = d.gainL / total;
+	d.subEnd[d.stagedSubs] = d.staged;
+	d.subGain[d.stagedSubs] = total;
 	d.stagedSubs++;
 
 	if (v.sourceType == kDirectPcm) {  // what the CPU's stream decoder paces itself by
