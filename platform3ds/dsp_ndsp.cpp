@@ -94,6 +94,12 @@ const float kDacRate = 32028.5f;                        // JASRate.cpp
 // --- ndsp channels ---------------------------------------------------------------------------------
 enum {
 	kChannels = 24,
+	// The DSP has 24 channels and busy scenes have more voices (Delfino Hotel ~34): the last channel
+	// plays a stereo mix, made on the CPU, of the voices that get no channel of their own.
+	kVoiceChans = kChannels - 1,
+	kMixChan = kChannels - 1,
+	kMixSubs = 16,        // subframes of that mix being filled (a buffer reaches back kSubPerBuf)
+	kSubMax = 160,        // output samples per subframe at most
 	kBufs = 24,           // queued buffers per channel: room for the game's audio catching up in a burst
 	                      // (a voice whose pitch moves every subframe submits a buffer per subframe)
 	kSubPerBuf = 7,       // subframes per buffer at most: one JAudio frame
@@ -128,6 +134,7 @@ struct Decoder {
 	float pan;              // left share of the total gain, as last audible
 	uint32_t subEnd[kSubPerBuf];  // staged samples at the end of each staged subframe
 	float subGain[kSubPerBuf];    // and the voice's total gain (left + right) there
+	uint32_t lastSub;             // the render call (subframe count) of the last staged subframe
 	int16_t stage[kBufSamples];
 	uint32_t staged;   // samples in stage
 	uint32_t stagedSubs;
@@ -142,6 +149,13 @@ struct State {
 	port_dspmix_aram_fn aram;
 	Decoder dec[64];
 	Chan chan[kChannels];
+	// the software mix (kMixChan): stereo sums by subframe, submitted kSubPerBuf subframes late
+	int32_t mixAcc[kMixSubs][2 * kSubMax];
+	bool mixUsed[kMixSubs];
+	uint32_t subNow;    // render calls so far: the current subframe
+	uint32_t mixNext;   // the next subframe of the mix to submit
+	uint32_t subN;      // output samples per subframe (80)
+	uint32_t softMixed; // voice buffers mixed on the CPU
 	bool ndspOk;
 	int active;
 	uint32_t overruns, unassigned;
@@ -403,15 +417,15 @@ void releaseChan(Decoder& d, bool now)
 int takeChan(int vi, float loudness)
 {
 	int pick = -1;
-	for (int c = 0; c < kChannels && pick < 0; c++)
+	for (int c = 0; c < kVoiceChans && pick < 0; c++)
 		if (g.chan[c].voice < 0 && chanIdle(c))
 			pick = c;
-	for (int c = 0; c < kChannels && pick < 0; c++)
+	for (int c = 0; c < kVoiceChans && pick < 0; c++)
 		if (g.chan[c].voice < 0)  // still playing out a finished voice
 			pick = c;
 	if (pick < 0) {  // all taken: the quietest voice gives its channel up if quieter than this one
 		float least = loudness;
-		for (int c = 0; c < kChannels; c++) {
+		for (int c = 0; c < kVoiceChans; c++) {
 			const Decoder& o = g.dec[g.chan[c].voice];
 			const float l = o.gainL + o.gainR;
 			if (l < least) {
@@ -426,6 +440,59 @@ int takeChan(int vi, float loudness)
 	chanReset(pick);
 	g.chan[pick].voice = vi;
 	return pick;
+}
+
+// A voice buffer with no channel of its own (all taken by louder voices) goes into the software mix:
+// its n samples (volume already ramped) are stretched linearly over the `subs` subframes they were
+// consumed in, ending at d.lastSub, and added with the buffer's peak volume and pan.
+void softMix(const Decoder& d, uint32_t n, uint32_t subs, float peak)
+{
+	const uint32_t sn = g.subN ? g.subN : 80, outN = subs * sn;
+	const uint32_t first = d.lastSub + 1 - subs;
+	if (first < g.mixNext || !n)
+		return;  // already submitted (cannot happen: buffers reach back kSubPerBuf at most)
+	const float gl = peak * d.pan, gr = peak * (1.0f - d.pan);
+	const uint64_t step = ((uint64_t)n << 16) / outN;
+	uint64_t p = 0;
+	for (uint32_t k = 0; k < outN; k++, p += step) {
+		const uint32_t i = (uint32_t)(p >> 16), fr = (uint32_t)(p & 0xFFFF);
+		const int32_t s0 = d.stage[i], s1 = d.stage[i + 1 < n ? i + 1 : i];
+		const float smp = (float)(s0 + (((s1 - s0) * (int32_t)fr) >> 16));
+		const uint32_t sub = first + k / sn, slot = sub % kMixSubs, off = k % sn;
+		g.mixAcc[slot][2 * off] += (int32_t)(smp * gl);
+		g.mixAcc[slot][2 * off + 1] += (int32_t)(smp * gr);
+		g.mixUsed[slot] = true;
+	}
+	g.softMixed++;
+}
+
+// The software mix's subframe `sub`, onto its channel (nothing when no voice was mixed into it).
+void submitMix(uint32_t sub)
+{
+	const uint32_t slot = sub % kMixSubs, sn = g.subN;
+	if (!g.mixUsed[slot])
+		return;
+	g.mixUsed[slot] = false;
+	int32_t* acc = g.mixAcc[slot];
+	Chan& ch = g.chan[kMixChan];
+	ndspWaveBuf& wb = ch.wb[ch.next];
+	if (wb.status == NDSP_WBUF_QUEUED || wb.status == NDSP_WBUF_PLAYING || s_npending == 64) {
+		g.overruns++;
+		memset(acc, 0, 2 * sn * sizeof(int32_t));
+		return;
+	}
+	int16_t* dst = ringTake(2 * sn);
+	for (uint32_t i = 0; i < 2 * sn; i++) {
+		const int32_t v = acc[i];
+		dst[i] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+		acc[i] = 0;
+	}
+	memset(&wb, 0, sizeof wb);
+	wb.data_pcm16 = dst;
+	wb.nsamples = sn;  // stereo frames
+	wb.looping = false;
+	s_pending[s_npending++] = Pending{kMixChan, ch.gen, &wb};
+	ch.next = (ch.next + 1) % kBufs;
 }
 
 // Queues the decoded samples of voice `vi` on its channel (taking one when it has volume), their
@@ -445,11 +512,31 @@ void submit(int vi, const Voice& v)
 		d.prevGain = endGain;
 		return;
 	}
+	// the volume ramp, in place
+	{
+		const float inv = 1.0f / peak;
+		uint32_t at = 0;
+		float g0 = d.prevGain;
+		for (uint32_t k = 0; k < subs; k++) {
+			const uint32_t end = d.subEnd[k] < n ? d.subEnd[k] : n;
+			const float g1 = d.subGain[k];
+			if (end > at) {
+				const float step = (g1 - g0) * inv / float(end - at);
+				float f = g0 * inv;
+				for (; at < end; at++) {
+					f += step;
+					d.stage[at] = (int16_t)((float)d.stage[at] * f);
+				}
+			}
+			g0 = g1;
+		}
+	}
+	d.prevGain = endGain;
 	if (d.chan < 0) {
 		d.chan = takeChan(vi, peak);
 		if (d.chan < 0) {
 			g.unassigned++;
-			d.prevGain = endGain;
+			softMix(d, n, subs, peak);
 			return;
 		}
 	}
@@ -457,27 +544,10 @@ void submit(int vi, const Voice& v)
 	ndspWaveBuf& wb = ch.wb[ch.next];
 	if (wb.status == NDSP_WBUF_QUEUED || wb.status == NDSP_WBUF_PLAYING || s_npending == 64) {
 		g.overruns++;  // the DSP is that far behind: drop rather than wait
-		d.prevGain = endGain;
 		return;
 	}
 	int16_t* dst = ringTake(n);
-	const float inv = 1.0f / peak;
-	uint32_t at = 0;
-	float g0 = d.prevGain;
-	for (uint32_t k = 0; k < subs; k++) {
-		const uint32_t end = d.subEnd[k] < n ? d.subEnd[k] : n;
-		const float g1 = d.subGain[k];
-		if (end > at) {
-			const float step = (g1 - g0) * inv / float(end - at);
-			float f = g0 * inv;
-			for (; at < end; at++) {
-				f += step;
-				dst[at] = (int16_t)((float)d.stage[at] * f);
-			}
-		}
-		g0 = g1;
-	}
-	d.prevGain = endGain;
+	memcpy(dst, d.stage, n * sizeof(int16_t));
 	memset(&wb, 0, sizeof wb);
 	wb.data_pcm16 = dst;
 	wb.nsamples = n;
@@ -616,6 +686,7 @@ void render_voice(int vi, int n, float master)
 		d.pan = d.gainL / total;
 	d.subEnd[d.stagedSubs] = d.staged;
 	d.subGain[d.stagedSubs] = total;
+	d.lastSub = g.subNow;
 	d.stagedSubs++;
 
 	if (v.sourceType == kDirectPcm) {  // what the CPU's stream decoder paces itself by
@@ -664,6 +735,15 @@ extern "C" bool sms3ds_ndsp_init(void)
 	}
 	for (int c = 0; c < kChannels; c++)
 		chanReset(c);
+	// the software mix: stereo, at the DSP's own rate, unscaled
+	ndspChnSetInterp(kMixChan, NDSP_INTERP_NONE);
+	ndspChnSetFormat(kMixChan, NDSP_FORMAT_STEREO_PCM16);
+	ndspChnSetRate(kMixChan, kDacRate);
+	{
+		float mix[12] = {};
+		mix[0] = mix[1] = 1.0f;
+		ndspChnSetMix(kMixChan, mix);
+	}
 	for (int i = 0; i < 64; i++)
 		g.dec[i].chan = -1;
 	g.ndspOk = true;
@@ -701,7 +781,7 @@ extern "C" void port_dspmix_setup(uint32_t nvoices, void* voices, const uint32_t
 	first = false;
 	const char* e = getenv("SMS_AUDIO_TRACE");
 	g.trace = e && *e && strcmp(e, "0") != 0;
-	fprintf(stderr, "[audio] voices played by the 3DS DSP (ndsp, %d channels)%s\n", kChannels,
+	fprintf(stderr, "[audio] voices played by the 3DS DSP (ndsp, %d channels and a software mix)%s\n", kVoiceChans,
 	        g.ndspOk ? "" : ": ndsp is not running, silent");
 }
 
@@ -713,6 +793,8 @@ extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t
 	memset(outA, 0, n * sizeof(int16_t));  // the DSP plays the voices; the AI DMA carries silence
 	memset(outB, 0, n * sizeof(int16_t));
 	g.active = 0;
+	if (n > 0 && n <= kSubMax)
+		g.subN = (uint32_t)n;
 	const float m = (float)master / 32768.0f;  // Q15 (PROTOCOL.md, Levels)
 	if (g.voices)
 		for (uint32_t i = 0; i < g.nvoices; i++) {
@@ -728,16 +810,21 @@ extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t
 			}
 			render_voice((int)i, n, m);
 		}
+	// the software mix's subframes no voice buffer can reach any more
+	while (g.ndspOk && g.mixNext + kSubPerBuf <= g.subNow)
+		submitMix(g.mixNext++);
+	g.subNow++;
 	if (g.ndspOk)
 		addPending();
 	{
 		int used = 0;
-		for (int c = 0; c < kChannels; c++)
+		for (int c = 0; c < kVoiceChans; c++)
 			used += g.chan[c].voice >= 0;
 		sms3ds_audio_stats[0] = (uint32_t)g.active;
 		sms3ds_audio_stats[1] = (uint32_t)used;
 		sms3ds_audio_stats[3] = g.overruns;
 		sms3ds_audio_stats[4] = g.unassigned;
+		sms3ds_audio_stats[7] = g.softMixed;
 		if (g.ndspOk) {
 			sms3ds_audio_stats[5] = ndspGetFrameCount();
 			sms3ds_audio_stats[6] = ndspGetDroppedFrames();
@@ -745,7 +832,7 @@ extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t
 	}
 	if (g.trace && ++g.traceTick % 2000 == 0) {
 		int used = 0;
-		for (int c = 0; c < kChannels; c++)
+		for (int c = 0; c < kVoiceChans; c++)
 			used += g.chan[c].voice >= 0;
 		fprintf(stderr, "[audio] %u subframes: %d voices, %d channels, %lu without a channel, %lu overruns\n",
 		        g.traceTick, g.active, used, (unsigned long)g.unassigned, (unsigned long)g.overruns);
