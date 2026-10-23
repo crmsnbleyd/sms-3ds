@@ -174,7 +174,7 @@ if(SMS_3DS_GX STREQUAL "null")
   set(SMS_GX_BACKEND_SOURCES platform3ds/gx_null_backend.cpp)
 else()
   set(SMS_GX_BACKEND_SOURCES platform3ds/gx3ds/render.cpp platform3ds/gx3ds/vtx.cpp platform3ds/gx3ds/texture.cpp
-    platform3ds/gx3ds/tev.cpp)
+    platform3ds/gx3ds/tev.cpp platform3ds/gx3ds/gxqueue.cpp)
   # Built with libctru's short enums (they include <citro3d.h>); they share no enum-typed struct
   # members with the GX front end.
   set_source_files_properties(${SMS_GX_BACKEND_SOURCES} PROPERTIES COMPILE_OPTIONS "-fshort-enums")
@@ -272,6 +272,12 @@ set_property(TARGET sms_3ds APPEND PROPERTY LINK_OPTIONS -Wl,-Map,${CMAKE_BINARY
 # Mixed enum sizes are intended (see -fno-short-enums above): no struct with an enum member crosses
 # between libctru/<3ds.h> code and game code.
 set_property(TARGET sms_3ds APPEND PROPERTY LINK_OPTIONS -Wl,--no-enum-size-warning)
+# citro3d's GX queue is run early rather than overflowing (platform3ds/gx3ds/gxqueue.cpp).
+if(NOT SMS_3DS_GX STREQUAL "null")
+  set_property(TARGET sms_3ds APPEND PROPERTY LINK_OPTIONS
+    -Wl,--wrap=GX_BindQueue -Wl,--wrap=GX_ProcessCommandList -Wl,--wrap=GX_MemoryFill
+    -Wl,--wrap=GX_DisplayTransfer -Wl,--wrap=GX_TextureCopy)
+endif()
 
 # --- 3DS package --------------------------------------------------------------------------------
 ctr_generate_smdh(${CMAKE_BINARY_DIR}/sms_3ds.smdh

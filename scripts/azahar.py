@@ -12,7 +12,8 @@
 #                                                 (3DS units, rim ~156) for SECONDS (default 0.2);
 #                                                 CX CY after the stick: the C-stick (camera)
 #   uv run scripts/azahar.py wait-area AREA [TIMEOUT]   until the game is in that area (state 5)
-#   uv run scripts/azahar.py plaza                from the title screen to Delfino Plaza (file A)
+#   uv run scripts/azahar.py plaza [AREA]         from the title screen to Delfino Plaza (file A), or to
+#                                                 AREA when settings.txt on the SD card sets SMS_WARP
 #   uv run scripts/azahar.py log [N]              the last N lines of the game's log.txt
 #
 # Uses the AzaharRPC.py that ships with Azahar (AZAHAR_SCRIPTING, default ~/Downloads/azahar/scripting)
@@ -190,7 +191,7 @@ def mario_pos(c):
     return struct.unpack("<3f", data) if data else None
 
 
-def cmd_plaza():
+def cmd_plaza(area="1"):
     # title -> file A -> Delfino Plaza, past the "explanation again?" question and the flyover
     c = rpc()
     state = lambda: (read(c, "sms3ds_state", "i")[0], read(c, "sms3ds_area", "i")[0])
@@ -226,11 +227,11 @@ def cmd_plaza():
     cmd_pad("A")  # jump into the block: its menu, START highlighted
     time.sleep(2.5)
     cmd_pad("A")
-    cmd_wait_area(1, "60")
+    cmd_wait_area(int(area), "60")  # another area with SMS_WARP in the SD card's settings.txt
     for _ in range(12):  # "No" to the explanation question, then skip/ride out the flyover
         time.sleep(1.5)
         cmd_pad("A")
-    print("in the plaza")
+    print("in the plaza" if area == "1" else "in area " + area)
 
 
 def cmd_log(n="30"):
