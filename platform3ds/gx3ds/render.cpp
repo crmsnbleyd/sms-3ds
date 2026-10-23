@@ -634,8 +634,11 @@ void copyToTexture(uint32_t ctrl)
 	// Write-back for copies the CPU may read: small ones (the sun's visibility check) and the
 	// one-channel ones (the goop maps, GX_CTF_R8, read by TPollutionLayer::isPolluted). The large
 	// colour copies (the screen texture, the mirror) are only ever sampled by the GPU; encoding them
-	// on the CPU every frame cost more than 10 ms.
-	c.writesBack = !s_calibrating && c.bytes && (c.bytes <= (64u << 10) || layout <= 1);
+	// on the CPU every frame cost more than 10 ms. So are one-channel copies of the whole picture
+	// (the Bowser bath's GX_CTF_A8 mask, drawn right after it is made: 11 ms a frame to encode);
+	// the goop maps are drawn into a corner at their own size.
+	const bool wholePicture = w >= 640 && h >= 448;
+	c.writesBack = !s_calibrating && c.bytes && (c.bytes <= (64u << 10) || (layout <= 1 && !wholePicture));
 	if (c.writesBack) {
 		const size_t size = c.tex.size;
 		if (!c.lin)
