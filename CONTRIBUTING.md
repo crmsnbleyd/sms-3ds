@@ -12,4 +12,6 @@ git -C refs/sms-pc-port checkout --recurse-submodules e3cdcca1d3a78f657d2d195c0d
 scripts/build-3ds.sh
 ```
 
-The result is `build-3ds/sms_3ds.3dsx`.
+The result is `build-3ds/sms_3ds.3dsx`, a debug build: it includes developer tools such as GX frame dumps,
+which write to the SD card. For a release build without them, run `scripts/build-3ds.sh --release`; the
+result is `build-3ds-release/sms_3ds.3dsx`. Both are built with the same optimisation.

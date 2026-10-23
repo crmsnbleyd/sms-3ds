@@ -61,6 +61,8 @@ on the GameCube) isn't possible yet.
 - Audio might sound crunchy.
 - Many cutscenes don't load.
 - The game runs at up to 30 fps and can slow down in busy scenes.
+- The picture keeps the GameCube's 4:3 shape, with black bars at the sides of the top screen. Widescreen isn't
+  implemented yet.
 
 ## Contributing
 

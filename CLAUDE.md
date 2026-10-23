@@ -78,7 +78,8 @@ refs/                   gitignored, read-only reference clones
   sms-pc-port/          chasem-dev/sms-pc-port @ e3cdcca, decomp/ @ 967436b
 rom/                    gitignored; the user's disc image (CISO)
 build-pc/               gitignored; PC baseline build (macos-arm64/)
-build-3ds/              gitignored; 3DS build (sms_3ds.3dsx, .elf, .map, patched/ and port-patched/ copies)
+build-3ds/              gitignored; 3DS debug build (sms_3ds.3dsx, .elf, .map, patched/ and port-patched/ copies)
+build-3ds-release/      gitignored; 3DS release build (scripts/build-3ds.sh --release)
 ```
 
 ## Check the environment
@@ -93,7 +94,8 @@ Exit 0 means no FAIL. Expected versions and commits live at the top of the scrip
 ## Build and run (3DS)
 
 ```sh
-scripts/build-3ds.sh             # -> build-3ds/sms_3ds.3dsx
+scripts/build-3ds.sh             # debug build (GX frame dumps) -> build-3ds/sms_3ds.3dsx
+scripts/build-3ds.sh --release   # release build, for GitHub releases -> build-3ds-release/sms_3ds.3dsx
 ```
 
 On the SD card (Azahar: its `sdmc` folder): the disc image at `3ds/sms-3ds/game.ciso` (or `game.iso`); the game writes

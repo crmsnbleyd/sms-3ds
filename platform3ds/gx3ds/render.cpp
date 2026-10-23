@@ -898,9 +898,13 @@ std::unordered_set<uint64_t> s_dumpSeen;
 uint32_t s_dumpBatches;
 
 // A dump is taken 10 s (300 display frames) after entering each area, once per area, on sms3ds_gx_dump_request, or
-// when the file sdmc:/3ds/sms-3ds/dump exists (checked every second; removed when taken).
+// when the file sdmc:/3ds/sms-3ds/dump exists (checked every second; removed when taken). Debug
+// builds only: a release never dumps.
 bool dumpDue()
 {
+#if !SMS3DS_DEBUG
+	return false;
+#endif
 	static int lastArea = -1, lastState = -1;
 	static uint32_t since;
 	static uint64_t dumpedAreas;

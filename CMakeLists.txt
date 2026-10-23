@@ -182,6 +182,16 @@ else()
   ctr_add_shader_library(gx3ds_gx platform3ds/gx3ds/gx.v.pica)
   dkp_add_embedded_binary_library(gx3ds_shaders gx3ds_passthru gx3ds_gx)
 endif()
+# Debug build (default) or release build (scripts/build-3ds.sh --release): same optimisation, but a
+# release leaves out the developer tools that write to the SD card (GX frame dumps).
+option(SMS_3DS_DEBUG "Debug build: include developer tools (GX frame dumps)" ON)
+if(SMS_3DS_DEBUG)
+  add_compile_definitions(SMS3DS_DEBUG=1)
+  message(STATUS "sms-3ds: debug build")
+else()
+  add_compile_definitions(SMS3DS_DEBUG=0)
+  message(STATUS "sms-3ds: release build")
+endif()
 # The GX thread (both backends): the front end and renderer on core 2, beside the game.
 add_library(sms_gx STATIC ${SMS_GX_FRONT_SOURCES} ${SMS_GX_GD_SOURCES} ${SMS_GX_BACKEND_SOURCES}
   platform3ds/gx3ds/gxthread.cpp)
