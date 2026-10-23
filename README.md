@@ -11,7 +11,7 @@ This is an early hobby project. Expect bugs; see [Known issues](#known-issues).
   The original 3DS / 2DS models are not supported.
 - Your own disc image of **Super Mario Sunshine, USA/Canada (GMSE01), revision 0**.
 - The 3DS DSP firmware, for sound (see step 3 below).
-- `sms_3ds.3dsx`, from the Releases page.
+- `sms_3ds.3dsx` from the [latest release](https://github.com/crmsnbleyd/sms-3ds/releases/latest).
 
 ## Setting up
 

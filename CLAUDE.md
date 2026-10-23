@@ -27,7 +27,8 @@ See also `local/ENVIRONMENT.md` (gitignored: versions, commits, machine quirks) 
 ## Distribution rules (hard)
 
 - Distribute **source code, and `sms_3ds.3dsx` as a GitHub release download** (the owner attaches it to releases;
-  never commit it). Players bring their own disc image.
+  never commit it). Players bring their own disc image. Releases are tagged by date, `YYYY.MM.DD` (`.2`, `.3`
+  for more the same day), built with `scripts/build-3ds.sh --release`, and marked latest (not pre-release).
 - **Never commit, bundle or upload**: the ISO/CISO, anything extracted or converted from it (textures, models, audio,
   `.szs`/`.arc`/`.bmd`/`.bti`/`.thp`/…), CIAs, the PC port's `SMS.app`/standalone builds,
   or the 3DS DSP firmware (`dspfirm.cdc`, dumped from the user's console for ndsp).
