@@ -26,6 +26,8 @@
 // HUD (sms3ds.h): per game frame, the game thread's frame time, its waits for the GX thread, and
 // the GX thread's busy time.
 volatile float sms3ds_prof_cpu_ms, sms3ds_prof_gxwait_ms, sms3ds_prof_gxbusy_ms;
+// the game thread's waits by cause (us): queue full, GXDrawDone fences, the frame boundary; fences
+volatile uint32_t sms3ds_gx_waits[4];
 // GX thread, per game frame: GXCallDisplayList calls and their time outside flushes and vertex
 // decoding (the display-list cache's checks and replays), and the stream's size
 volatile float sms3ds_prof_dl_ms;
@@ -75,6 +77,7 @@ LightSemaphore s_filled, s_free;
 std::atomic<uint32_t> s_pushed{0}, s_done{0};  // chunks sent / run
 std::atomic<bool> s_fenceWaiting{false};
 u64 s_waitTicks, s_lastBoundary;     // the game's side
+u64 s_waitBy[3];                      // s_waitTicks by cause: queue full, fence, frame boundary
 std::atomic<uint32_t> s_busyTicks{0};  // the GX thread's (ticks / 64, so a frame fits in 32 bits)
 std::atomic<uint32_t> s_dlTicks{0}, s_dlCalls{0}, s_streamBytes{0};  // the GX thread's, as above
 LightEvent s_doneEvent;
@@ -182,6 +185,7 @@ void gxqPush(const uint8_t* p, uint32_t n)
 			const u64 t0 = svcGetSystemTick();
 			LightSemaphore_Acquire(&s_free, 1);
 			s_waitTicks += svcGetSystemTick() - t0;
+			s_waitBy[0] += svcGetSystemTick() - t0;
 		}
 		Slot& s = s_slots[s_w];
 		memcpy(s.data, p, m);
@@ -196,8 +200,9 @@ void gxqPush(const uint8_t* p, uint32_t n)
 
 namespace {
 uint32_t s_prevFrameEnd;  // chunks up to the previous frame's display copy
+uint32_t s_fences;        // gxqFence calls this frame
 
-void waitDone(uint32_t target)
+void waitDone(uint32_t target, int cause)
 {
 	if (int32_t(s_done.load() - target) >= 0)
 		return;
@@ -208,15 +213,33 @@ void waitDone(uint32_t target)
 		LightEvent_Wait(&s_doneEvent);
 	s_fenceWaiting.store(false);
 	s_waitTicks += svcGetSystemTick() - t0;
+	s_waitBy[cause] += svcGetSystemTick() - t0;
 }
 }  // namespace
+
+// A position in the stream (everything the game has sent so far) and whether the GX thread has
+// run past it: lets the game reuse memory a draw read without waiting for the whole frame
+// (patches/decomp/3ds-09: the THP player's texture sets).
+extern "C" uint32_t sms3ds_gx_mark(void)
+{
+	if (!gxAsync())
+		return 0;
+	pipePushAll();
+	return s_pushed.load();
+}
+
+extern "C" int sms3ds_gx_reached(uint32_t mark)
+{
+	return !gxAsync() || int32_t(s_done.load() - mark) >= 0;
+}
 
 void gxqFence()
 {
 	if (!gxAsync())
 		return;
 	pipePushAll();
-	waitDone(s_pushed.load());
+	s_fences++;
+	waitDone(s_pushed.load(), 1);
 }
 
 // After a display copy: the GX thread may still draw this frame, but must have finished the one
@@ -228,12 +251,15 @@ void gxqFrameBoundary()
 	pipePushAll();
 	const uint32_t prev = s_prevFrameEnd;
 	s_prevFrameEnd = s_pushed.load();
-	waitDone(prev);
+	waitDone(prev, 2);
 	const u64 now = svcGetSystemTick();
 	if (s_lastBoundary) {
 		const double ms = 1000.0 / SYSCLOCK_ARM11;
 		sms3ds_prof_cpu_ms = (float)((now - s_lastBoundary) * ms);
 		sms3ds_prof_gxwait_ms = (float)(s_waitTicks * ms);
+		for (int i = 0; i < 3; i++)
+			sms3ds_gx_waits[i] = (uint32_t)(s_waitBy[i] * 1000000ull / SYSCLOCK_ARM11);
+		sms3ds_gx_waits[3] = s_fences;
 		sms3ds_prof_gxbusy_ms = (float)((u64)s_busyTicks.exchange(0) * 64 * ms);
 		sms3ds_prof_dl_ms = (float)((u64)s_dlTicks.exchange(0) * 64 * ms);
 		sms3ds_gx_dl_calls = s_dlCalls.exchange(0);
@@ -241,6 +267,8 @@ void gxqFrameBoundary()
 	}
 	s_lastBoundary = now;
 	s_waitTicks = 0;
+	s_waitBy[0] = s_waitBy[1] = s_waitBy[2] = 0;
+	s_fences = 0;
 }
 
 void gxqStop()

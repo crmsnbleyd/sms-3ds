@@ -135,6 +135,7 @@ def cmd_hud():
         ("tev compiles / xf-only set-ups", "%d / %d" % read(c, "sms3ds_gx_count", "10I")[8:]),
         ("audio: voices / channels / bufs / overruns / no-chan / ndsp frames / dropped",
          " / ".join(str(x) for x in read(c, "sms3ds_audio_stats", "7I"))),
+        ("gx waits us: queue / fence / boundary; fences", "%d / %d / %d; %d" % read(c, "sms3ds_gx_waits", "4I")),
         ("game HUD: batches / verts / us", "%d / %d / %d" % read(c, "sms3ds_gx_hud", "3I")),
         ("approx why", "%05x" % u("sms3ds_gx_approx_why")),
     ]

@@ -1,0 +1,95 @@
+--- a/libs/THPPlayer/src/THPPlayer.c
++++ b/libs/THPPlayer/src/THPPlayer.c
+@@ -64,6 +64,27 @@
+ static BOOL ProperTimingForStart();
+ static BOOL ProperTimingForGettingNextFrame();
+ static void PushUsedTextureSet(OSMessage msg);
++#ifdef __3DS__
++// The game loop calls THPPlayerDrawDone every frame, and retail waits there (GXDrawDone) until the GPU
++// has drawn the whole frame, so that the movie's texture sets drawn in it can be decoded into again.
++// On the 3DS the GX thread draws beside the game: that wait idled the game thread ~7 ms a frame at
++// Delfino Plaza, whose TV plays a movie all the time. A texture set's memory is free once the GX
++// thread has run past the draw that read it (the renderer keeps its own copy of the texture), so
++// used sets are parked, each with the stream position after its frame, and go back to the free
++// queue once the GX thread has passed it. sms3ds_gx_mark / sms3ds_gx_reached:
++// platform3ds/gx3ds/gxthread.cpp.
++#ifdef __cplusplus
++extern "C" {
++#endif
++unsigned int sms3ds_gx_mark(void);
++int sms3ds_gx_reached(unsigned int mark);
++#ifdef __cplusplus
++}
++#endif
++static void* sms3dsParkedSet[8];
++static unsigned int sms3dsParkedMark[8];
++static int sms3dsParked;
++#endif
+ static void PlayControl(u32);
+ 
+ static s16* audioCallbackWithMSound(s32 p1)
+@@ -345,6 +366,9 @@
+ 	for (i = 0; i < THP_TEXTURE_SET_COUNT; i++) {
+ 		PushFreeTextureSet(&ActivePlayer.textureSet[i]);
+ 	}
++#ifdef __3DS__
++	sms3dsParked = 0;
++#endif
+ 
+ 	if (ActivePlayer.audioExist) {
+ 		for (i = 0; i < THP_AUDIO_BUFFER_COUNT; i++) {
+@@ -537,6 +561,9 @@
+ 		}
+ 
+ 		while (PopUsedTextureSet() != 0) { }
++#ifdef __3DS__
++		sms3dsParked = 0;
++#endif
+ 
+ 		ActivePlayer.curVolume  = ActivePlayer.targetVolume;
+ 		ActivePlayer.rampCount  = 0;
+@@ -767,6 +794,36 @@
+ 	return NULL;
+ }
+ 
++#ifdef __3DS__
++void THPPlayerDrawDone()
++{
++	if (Initialized) {
++		unsigned int mark = sms3ds_gx_mark();
++		void* tex;
++		int i, n;
++		while ((tex = PopUsedTextureSet()) != NULL) {
++			if (sms3dsParked == 8) {  // never with the player's three sets
++				GXDrawDone();
++				PushFreeTextureSet(tex);
++				continue;
++			}
++			sms3dsParkedSet[sms3dsParked]  = tex;
++			sms3dsParkedMark[sms3dsParked] = mark;
++			sms3dsParked++;
++		}
++		for (i = 0, n = 0; i < sms3dsParked; i++) {
++			if (sms3ds_gx_reached(sms3dsParkedMark[i])) {
++				PushFreeTextureSet(sms3dsParkedSet[i]);
++			} else {
++				sms3dsParkedSet[n]  = sms3dsParkedSet[i];
++				sms3dsParkedMark[n] = sms3dsParkedMark[i];
++				n++;
++			}
++		}
++		sms3dsParked = n;
++	}
++}
++#else
+ void THPPlayerDrawDone()
+ {
+ 	GXDrawDone();
+@@ -779,6 +836,7 @@
+ 		}
+ 	}
+ }
++#endif
+ 
+ static void MixAudio(s16* destination, s16*, u32 sample)
+ {
