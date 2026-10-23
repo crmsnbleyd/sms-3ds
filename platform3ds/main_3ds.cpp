@@ -31,6 +31,8 @@ static void setDefault(const char* name, const char* value)
 	setenv(name, value, 0);
 }
 
+extern "C" bool sms3ds_ndsp_init(void);  // dsp_ndsp.cpp
+
 int main(int argc, char** argv)
 {
 	gfxInitDefault();
@@ -63,10 +65,13 @@ int main(int argc, char** argv)
 		        (unsigned long)(90000000ull * (u64)SYSCLOCK_ARM11 / (dt ? dt : 1) / 1000000ull));
 	}
 
-	// No sound output yet (Phase 3: the 3DS DSP through ndsp). SMS_NO_AUDIO=0 runs the game's audio with
-	// the software mixer, paced by ai.cpp's clock thread (SMS_AUDIO=0: no device): at the plaza start that
-	// mixing costs 8 ms a frame (17 ms while spraying), the game's own audio code about 1.5 ms.
-	setDefault("SMS_NO_AUDIO", "1");
+	// Sound: the game's audio runs and the 3DS DSP plays its voices (dsp_ndsp.cpp); ai.cpp only paces
+	// JAudio's frames (SMS_AUDIO=0: no output device of its own). ndsp needs the DSP firmware dumped
+	// from the console (sdmc:/3ds/dspfirm.cdc, e.g. with DSP1); without it the game runs silent
+	// (SMS_NO_AUDIO=1, which also skips the game's audio work).
+	const bool sound = sms3ds_ndsp_init();
+	fprintf(stderr, "[3ds] sound: %s\n", sound ? "ndsp" : "none (no sdmc:/3ds/dspfirm.cdc?): silent");
+	setDefault("SMS_NO_AUDIO", sound ? "0" : "1");
 	setDefault("SMS_AUDIO", "0");
 	setDefault("SMS_SKIP_MOVIES", "1");
 	setDefault("SMS_SKIP_INTRO", "1");

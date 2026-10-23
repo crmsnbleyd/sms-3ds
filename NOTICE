@@ -7,6 +7,8 @@ sms-3ds builds against, and adapts code from, chasem-dev/sms-pc-port:
   - platform3ds/gx3ds/gx.v.pica and vtx.cpp follow the vertex shader generated
     by sms-pc-port's platform/gx/src/gx_shader.cpp (genVS, emitLight); tev.cpp
     and texture.cpp follow its register encodings and texture decoders.
+  - platform3ds/dsp_ndsp.cpp replaces platform/audio/dsp_mixer.cpp and copies
+    its voice-block layout, AFC/PCM decoders and voice rules.
   - patches/port/*.patch modify sms-pc-port files (applied at configure time to
     copies in the build directory; the originals are not redistributed here).
 
