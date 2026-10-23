@@ -11,6 +11,7 @@ extern "C" {
 // Where the user's files live on the SD card (never in the repo).
 #define SMS3DS_DIR "sdmc:/3ds/sms-3ds"
 #define SMS3DS_DISC SMS3DS_DIR "/game.ciso"
+#define SMS3DS_DISC_ISO SMS3DS_DIR "/game.iso"  // tried when game.ciso is missing
 #define SMS3DS_LOG SMS3DS_DIR "/log.txt"
 
 // log_3ds.cpp: stdout/stderr go to the emulator's debug log (svcOutputDebugString), to SMS3DS_LOG,

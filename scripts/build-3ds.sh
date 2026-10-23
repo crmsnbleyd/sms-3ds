@@ -14,4 +14,4 @@ if [[ ! -f "$B/build.ninja" ]]; then
 fi
 cmake --build "$B"
 "$DEVKITARM/bin/arm-none-eabi-size" "$B/sms_3ds.elf"
-echo "Built $B/sms_3ds.3dsx (never commit or share it: it is built from game code)"
+echo "Built $B/sms_3ds.3dsx (never commit it: it goes on GitHub releases)"

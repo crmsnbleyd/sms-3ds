@@ -78,12 +78,14 @@ int main(int argc, char** argv)
 	// The game's own 30 fps logic (sms-pc-port defaults to 60, twice the work per second).
 	setDefault("SMS_FRAME_RATE", "30");
 	setDefault("SMS_SAVE_DIR", SMS3DS_DIR "/card-a");
-	setDefault("SMS_DISC_ROOT", SMS3DS_DISC);
 	setDefault("SMS_SETTINGS", SMS3DS_DIR "/settings.txt");
 
+	// The disc image: game.ciso, else game.iso (the reader tells CISO from ISO by its header).
 	struct stat st;
+	setDefault("SMS_DISC_ROOT", stat(SMS3DS_DISC, &st) != 0 && stat(SMS3DS_DISC_ISO, &st) == 0 ? SMS3DS_DISC_ISO : SMS3DS_DISC);
 	if (stat(getenv("SMS_DISC_ROOT"), &st) != 0)
-		sms3ds_hud_fatal("No disc image: put your GMSE01 .ciso/.iso at " SMS3DS_DISC);
+		sms3ds_hud_fatal("No disc image: put your GMSE01 disc at " SMS3DS_DISC " or " SMS3DS_DISC_ISO);
+	fprintf(stderr, "[3ds] disc: %s\n", getenv("SMS_DISC_ROOT"));
 
 	char* args[] = {argc > 0 ? argv[0] : (char*)"sms-3ds", NULL};
 	port_init(1, args);

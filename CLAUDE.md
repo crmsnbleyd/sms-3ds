@@ -26,10 +26,12 @@ See also `local/ENVIRONMENT.md` (gitignored: versions, commits, machine quirks) 
 
 ## Distribution rules (hard)
 
-- Distribute **only source code plus a browser-based asset converter** (the user converts their own disc).
+- Distribute **source code, and `sms_3ds.3dsx` as a GitHub release download** (the owner attaches it to releases;
+  never commit it). Players bring their own disc image.
 - **Never commit, bundle or upload**: the ISO/CISO, anything extracted or converted from it (textures, models, audio,
-  `.szs`/`.arc`/`.bmd`/`.bti`/`.thp`/…), compiled game binaries (`.elf`, `.3dsx`), CIAs, the PC port's `SMS.app`/standalone builds,
+  `.szs`/`.arc`/`.bmd`/`.bti`/`.thp`/…), CIAs, the PC port's `SMS.app`/standalone builds,
   or the 3DS DSP firmware (`dspfirm.cdc`, dumped from the user's console for ndsp).
+- **Never commit** compiled binaries (`.elf`, `.3dsx`); the `.3dsx` goes only on GitHub releases.
 - Do not copy the PC port's game screenshots (`platform/gx/shots/*.png`) or any other retail-derived imagery.
 - `scripts/check-env.sh` fails if git tracks any of these (by extension, path, or file magic).
 
@@ -54,6 +56,8 @@ See also `local/ENVIRONMENT.md` (gitignored: versions, commits, machine quirks) 
 
 ```
 CLAUDE.md               this file
+README.md               user-facing: setup, controls, known issues, building
+CONTRIBUTING.md         for people working on the port (empty for now)
 NOTICE                  MIT notice for code adapted from sms-pc-port
 CMakeLists.txt          3DS build: game + PC platform layer from refs/, our patches, platform3ds/
 cmake/patches.cmake     copy-then-patch at configure time (refs/ is never written)
@@ -92,7 +96,7 @@ Exit 0 means no FAIL. Expected versions and commits live at the top of the scrip
 scripts/build-3ds.sh             # -> build-3ds/sms_3ds.3dsx
 ```
 
-On the SD card (Azahar: its `sdmc` folder): the disc image at `3ds/sms-3ds/game.ciso`; the game writes
+On the SD card (Azahar: its `sdmc` folder): the disc image at `3ds/sms-3ds/game.ciso` (or `game.iso`); the game writes
 `3ds/sms-3ds/log.txt` and saves under `3ds/sms-3ds/card-a/`. Never change refs/: change behaviour with a patch
 (`scripts/make-patch.sh edit port|decomp <path>`, edit `work/...`, then `scripts/make-patch.sh diff port|decomp <name> <path>...`).
 Use `#ifdef __3DS__` in patches so they read as 3DS branches of the PC code.
