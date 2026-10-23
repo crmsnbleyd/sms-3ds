@@ -41,6 +41,7 @@ volatile uint32_t sms3ds_gx_dropped;
 volatile float sms3ds_gx_cpu_ms, sms3ds_gx_gpu_ms;
 volatile uint32_t sms3ds_gx_tev_approx, sms3ds_gx_approx_why, sms3ds_gx_dump_request;
 volatile uint32_t sms3ds_gx_hud[3];
+volatile uint32_t sms3ds_gx_skip_image;  // debug builds: draws sampling this texture address are skipped
 volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xform_ms, sms3ds_prof_tex_ms,
     sms3ds_prof_wait_ms, sms3ds_prof_decode_ms;
 volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
@@ -377,6 +378,7 @@ struct CopyTex {
 	uint32_t layout = 0, tw = 0, th = 0;
 };
 std::unordered_map<const void*, CopyTex> s_copies;
+FILE* s_dump;  // the frame dump being written (debug builds; see dumpDue)
 // s_copies' destinations as a short array (copyMaps scans it for every draw); rebuilt when stale
 const void* s_copyDests[32];
 int s_copyDestCount = -1;  // -1: rebuild
@@ -506,6 +508,9 @@ void copyToTexture(uint32_t ctrl)
 		        (unsigned)w, (unsigned)h, (unsigned)fmt, zcopy ? " depth" : "", half ? " half" : "", dest,
 		        (unsigned)pw, (unsigned)ph);
 	}
+	if (s_dump)
+		fprintf(s_dump, "\ncopy (%g,%g) %ux%u fmt %u%s%s clear %u to %p\n", (double)x0, (double)y0, (unsigned)w,
+		        (unsigned)h, (unsigned)fmt, zcopy ? " depth" : "", half ? " half" : "", (unsigned)((ctrl >> 11) & 1), dest);
 	c.bytes = gxTexBytes(copyLayout(fmt, zcopy), tw, th);
 	c.clock = writeClock();
 	c.frame = g_displayFrames;
@@ -935,7 +940,6 @@ void calibrateCopies()
 }
 
 // --- frame dump: the GX state of each distinct batch of one frame -------------------------
-FILE* s_dump;
 std::unordered_set<uint64_t> s_dumpSeen;
 uint32_t s_dumpBatches;
 
@@ -966,6 +970,13 @@ bool dumpDue()
 	if (g_displayFrames % 30 == 0 && remove("sdmc:/3ds/sms-3ds/dump") == 0)
 		return true;
 	return false;
+}
+
+float xff(int reg)
+{
+	float f;
+	memcpy(&f, &g.xfReg[reg], 4);
+	return f;
 }
 
 void dumpBatch(const TevPlan& plan, uint32_t why)
@@ -1009,6 +1020,22 @@ void dumpBatch(const TevPlan& plan, uint32_t why)
 	        (unsigned long)gen, (unsigned long)nst, (unsigned long)((gen >> 16) & 7), (unsigned long)g.bp[BP_ZMODE],
 	        (unsigned long)g.bp[BP_CMODE0], (unsigned long)g.bp[BP_CMODE1], (unsigned long)g.bp[BP_PE_CONTROL],
 	        (unsigned long)g.bp[BP_ALPHACOMPARE], (unsigned long)g.bp[BP_FOG3]);
+	fprintf(f, " vp %g %g %g %g %g %g proj%s %g %g %g %g %g %g scissor %06lx %06lx\n", (double)xff(XFR_VIEWPORT),
+	        (double)xff(XFR_VIEWPORT + 1), (double)xff(XFR_VIEWPORT + 2), (double)xff(XFR_VIEWPORT + 3),
+	        (double)xff(XFR_VIEWPORT + 4), (double)xff(XFR_VIEWPORT + 5), (g.xfReg[XFR_PROJ + 6] & 1) ? " ortho" : "",
+	        (double)xff(XFR_PROJ), (double)xff(XFR_PROJ + 1), (double)xff(XFR_PROJ + 2), (double)xff(XFR_PROJ + 3),
+	        (double)xff(XFR_PROJ + 4), (double)xff(XFR_PROJ + 5), (unsigned long)g.bp[BP_SCISSOR_TL],
+	        (unsigned long)g.bp[BP_SCISSOR_BR]);
+	if ((gen >> 16) & 7) {
+		fprintf(f, " ind: iref %06lx ss %06lx %06lx mtx", (unsigned long)g.bp[0x27], (unsigned long)g.bp[0x25],
+		        (unsigned long)g.bp[0x26]);
+		for (int r = 0x06; r <= 0x0E; r++)
+			fprintf(f, " %06lx", (unsigned long)(g.bp[r] & 0xFFFFFF));
+		fprintf(f, " cmd");
+		for (uint32_t st = 0; st < nst; st++)
+			fprintf(f, " %06lx", (unsigned long)(g.bp[0x10 + st] & 0xFFFFFF));
+		fprintf(f, "\n");
+	}
 	for (uint32_t st = 0; st < nst; st++) {
 		const uint32_t ord = (g.bp[BP_TREF + (st >> 1)] >> ((st & 1) * 12)) & 0xFFF;
 		const uint32_t ks = g.bp[BP_TEV_KSEL + (st >> 1)];
@@ -1414,7 +1441,13 @@ void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t 
 	const u64 tx2 = svcGetSystemTick();
 	s_tXform += tx1 - tx0;
 	s_tTex += tx2 - tx1;
-	if (ok && ((g.bp[BP_GENMODE] >> 14) & 3) != 3) {
+	bool skip = false;
+#if SMS3DS_DEBUG
+	// debugging: skip draws that sample sms3ds_gx_skip_image (written from outside, e.g. azahar.py)
+	for (int u = 0; u < plan.units && sms3ds_gx_skip_image; u++)
+		skip |= (uint32_t)(uintptr_t)g.texImage[plan.map[u]] == sms3ds_gx_skip_image;
+#endif
+	if (ok && !skip && ((g.bp[BP_GENMODE] >> 14) & 3) != 3) {
 		const u64 td = svcGetSystemTick();
 		C3D_DrawElements(GPU_TRIANGLES, (int)nidx, C3D_UNSIGNED_SHORT, idx);
 		s_tDraw += svcGetSystemTick() - td;
