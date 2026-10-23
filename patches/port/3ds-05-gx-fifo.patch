@@ -84,7 +84,18 @@
          else if (op >= 0x80 && op < 0xC0) {
              if (avail < 3) len = 3;
              else {
-@@ -1089,7 +1123,11 @@
+@@ -1047,6 +1081,10 @@
+     uint32_t skip = 0;    // calls left to run without the cache
+     uint32_t checkedClock = 0, checkedFrame = 0;  // when its source bytes were last compared
+     bool hashAlways = false;  // its bytes once changed with no write reported: compared on every call
++#ifdef __3DS__
++    DlEntry* alt = nullptr;   // another version of the same list, recorded with other inputs
++    uint32_t usedFrame = 0;   // display frame of its last use (the oldest version is replaced)
++#endif
+ };
+ // The entries (stable addresses) and an open-addressing index of them by
+ // list address (a thousand lookups a frame).
+@@ -1089,7 +1127,11 @@
  FILE* traceFile();
  
  // Lists are compared by hash at least this often (texture data: kRecheckFrames).
@@ -96,13 +107,107 @@
  
  static bool dlCacheEnabled() {
      static int on = -1;
-@@ -1372,10 +1410,41 @@
-     if (!b) fatal("out of memory growing the write-gather pipe");
-     s_pipeBuf = b;
-     s_pipeCap = cap;
-+    pipeFastUpdate();
-+}
-+
+@@ -1244,16 +1286,54 @@
+         runCommands(data, size);
+         return;
+     }
++#ifdef __3DS__
++    // A list called with different inputs in one frame (a shape drawn for several objects, each
++    // with its own vertex arrays) keeps a version per input set, up to kDlVariants, instead of
++    // being recorded again, and its vertices uploaded to the arena again, on every call.
++    enum { kDlVariants = 4 };
++    DlEntry& head = dlLookup(data);
++    if (head.skip) {
++        head.skip--;
++        runCommands(data, size);
++        return;
++    }
++    DlEntry* pick = nullptr;
++    for (DlEntry* v = &head; v && !pick; v = v->alt)
++        if (dlReusable(*v, data, size)) pick = v;
++    const bool hit = pick != nullptr;
++    if (!hit) {  // record into an unused version, a new one, or the least recently used
++        int n = 0;
++        DlEntry* last = nullptr;
++        for (DlEntry* v = &head; v; v = v->alt, n++) {
++            last = v;
++            if (!v->valid && !v->size) {
++                pick = v;
++                break;
++            }
++            if (!pick || v->usedFrame < pick->usedFrame) pick = v;
++        }
++        if (n < kDlVariants && pick && pick->valid) {
++            s_dlEntries.emplace_back();
++            last->alt = &s_dlEntries.back();
++            pick = last->alt;
++        }
++    }
++    DlEntry& e = *pick;
++    e.usedFrame = g_displayFrames;
++    if (hit) {
++#else
+     DlEntry& e = dlLookup(data);
++    DlEntry& head = e;
+     if (e.skip) {
+         e.skip--;
+         runCommands(data, size);
+         return;
+     }
+     if (dlReusable(e, data, size)) {
++#endif
+         if (e.stateOnly) {
+             dlReplayState(e);
+-            e.misses = 0;
++            head.misses = 0;
+             return;
+         }
+         const bool arena = arenaEnabled() && !traceFile();  // traces list the batch's own vertices
+@@ -1268,19 +1348,26 @@
+         }
+         s_vertsLoaded += e.verts;
+         g_traceLastVat = e.lastVat;
+-        e.misses = 0;
++        head.misses = 0;
+         return;
+     }
+     // (re)record; a list that keeps changing is left alone for a while
+-    if (e.valid || e.size) e.misses++;
++    if (e.valid || e.size) head.misses++;
+     if (batchUsesArena()) flushBatch();  // the batch may still read the runs about to be dropped
+     s_dlCacheBytes -= e.bytes;
+-    uint32_t misses = e.misses;
++    uint32_t misses = head.misses;
+     bool hashAlways = e.hashAlways;
++#ifdef __3DS__
++    DlEntry* alt = e.alt;
+     e = DlEntry();
+-    e.misses = misses;
++    e.alt = alt;
++    e.usedFrame = g_displayFrames;
++#else
++    e = DlEntry();
++#endif
++    head.misses = misses;
+     e.hashAlways = hashAlways;
+-    if (misses >= 3) e.skip = 4u << (misses - 3 < 8 ? misses - 3 : 8);
++    if (misses >= 3) head.skip = 4u << (misses - 3 < 8 ? misses - 3 : 8);
+     if (s_dlCacheBytes > (size_t(96) << 20)) {  // keep the cache bounded: start over
+         dlClear();
+         runCommands(data, size);
+@@ -1312,7 +1399,7 @@
+         if (used < size || !dlCompileState(e, data, size)) {
+             e.ops.clear();
+             e.words.clear();
+-            e.skip = ~0u;
++            head.skip = ~0u;
+             return;
+         }
+         e.stateOnly = true;
+@@ -1375,7 +1462,38 @@
+     pipeFastUpdate();
+ }
+ 
 +#ifdef __3DS__
 +// While the GX thread runs, the pipe collects the command stream (vertices from the game's inline
 +// writers, and everything gx_api.cpp sends) and hands it over in chunks of about kStreamChunk bytes;
@@ -120,14 +225,14 @@
 +    if (!s_async || !s_pipeLen) return;
 +    gxqPush(s_pipeBuf, s_pipeLen);
 +    s_pipeLen = 0;
-     pipeFastUpdate();
- }
++    pipeFastUpdate();
++}
 +uint32_t parseStream(const uint8_t* p, uint32_t n) {
 +    uint32_t need = 0;
 +    return parse(p, n, &need);
 +}
 +#endif
- 
++
  static void pipeRun() {
 +#ifdef __3DS__
 +    if (s_async) {
@@ -138,7 +243,7 @@
      uint32_t need = 1;
      uint32_t used = parse(s_pipeBuf, s_pipeLen, &need);
      if (used == s_pipeLen) {
-@@ -1402,6 +1471,26 @@
+@@ -1402,6 +1520,26 @@
  }
  
  void pipeWrite(const uint8_t* bytes, uint32_t n) { pipePut(bytes, n); }
@@ -165,7 +270,7 @@
  
  }  // namespace gx
  
-@@ -1417,7 +1506,25 @@
+@@ -1417,7 +1555,25 @@
  
  void GXPC_MemoryWritten(const void* p, uint32_t size) { memoryWritten(p, size); }
  
@@ -191,7 +296,7 @@
      if (!p || !size) return;
      uintptr_t a = reinterpret_cast<uintptr_t>(p);
      s_beRanges[a] = a + size;
-@@ -1426,6 +1533,7 @@
+@@ -1426,6 +1582,7 @@
      s_beHitHi = 0;
  }
  void GXPC_RemoveBigEndianRange(const void* p) {
@@ -199,7 +304,7 @@
      s_beRanges.erase(reinterpret_cast<uintptr_t>(p));
      s_beGen++;
      s_beHitLo = 1;
-@@ -1435,6 +1543,7 @@
+@@ -1435,6 +1592,7 @@
  void* GXPC_PhysToPtr(uint32_t phys) { return physToPtr(phys); }
  
  void GXPC_SetArrayBigEndian(int attr, int bigEndian) {
@@ -207,7 +312,7 @@
      int slot;
      if (attr == 25) slot = 1;           // GX_VA_NBT shares the normal array
      else if (attr >= 9 && attr <= 24) slot = attr - 9;
-@@ -1443,6 +1552,7 @@
+@@ -1443,6 +1601,7 @@
      g_arrayGen++;
  }
  void GXPC_SetDefaultArrayBigEndian(int bigEndian) {

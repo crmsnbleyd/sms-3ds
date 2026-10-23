@@ -6,16 +6,17 @@
 #   uv run scripts/azahar.py quit
 #   uv run scripts/azahar.py hud                  the bottom screen's counters, read from memory
 #   uv run scripts/azahar.py shot [name]          screenshot of both screens -> local/shots/<name>.png
-#   uv run scripts/azahar.py pad KEYS [SECONDS] [STICKX STICKY]
+#   uv run scripts/azahar.py pad KEYS [SECONDS] [STICKX STICKY [CX CY]]
 #                                                 hold buttons (A,B,X,Y,L,R,Z,START,UP,DOWN,LEFT,RIGHT,
 #                                                 joined with +; "-" for none) and the circle pad
-#                                                 (3DS units, rim ~156) for SECONDS (default 0.2)
+#                                                 (3DS units, rim ~156) for SECONDS (default 0.2);
+#                                                 CX CY after the stick: the C-stick (camera)
 #   uv run scripts/azahar.py wait-area AREA [TIMEOUT]   until the game is in that area (state 5)
 #   uv run scripts/azahar.py plaza                from the title screen to Delfino Plaza (file A)
 #   uv run scripts/azahar.py log [N]              the last N lines of the game's log.txt
 #
 # Uses the AzaharRPC.py that ships with Azahar (AZAHAR_SCRIPTING, default ~/Downloads/azahar/scripting)
-# and the symbols of build-3ds/sms_3ds.elf. Screenshots go to the gitignored local/shots/.
+# and the symbols of build-3ds/sms_3ds.elf (SMS3DS_ELF: another build's, when launching that one). Screenshots go to the gitignored local/shots/.
 import os
 import struct
 import subprocess
@@ -23,7 +24,7 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ELF = os.path.join(ROOT, "build-3ds", "sms_3ds.elf")
+ELF = os.environ.get("SMS3DS_ELF") or os.path.join(ROOT, "build-3ds", "sms_3ds.elf")  # symbols of the running build
 DEFAULT_3DSX = os.path.join(ROOT, "build-3ds", "sms_3ds.3dsx")
 APP = os.path.expanduser(os.environ.get("AZAHAR_APP", "~/Downloads/azahar/Azahar.app"))
 SCRIPTING = os.path.expanduser(os.environ.get("AZAHAR_SCRIPTING", "~/Downloads/azahar/scripting"))
@@ -152,14 +153,14 @@ def cmd_shot(name=None):
     print(path)
 
 
-def cmd_pad(keys, seconds="0.2", sx="0", sy="0"):
+def cmd_pad(keys, seconds="0.2", sx="0", sy="0", cx="0", cy="0"):
     bits = 0
     for k in keys.split("+"):
         if k and k != "-":
             bits |= KEYS[k.upper()]
     c = rpc()
     addr = sym("sms3ds_remote_pad")
-    c.write_memory(addr, struct.pack("<Ihhhh", bits, int(sx), int(sy), 0, 0))
+    c.write_memory(addr, struct.pack("<Ihhhh", bits, int(sx), int(sy), int(cx), int(cy)))
     time.sleep(float(seconds))
     c.write_memory(addr, struct.pack("<Ihhhh", 0, 0, 0, 0, 0))
 
