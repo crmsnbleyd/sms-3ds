@@ -73,7 +73,7 @@ int main(int argc, char** argv)
 	fprintf(stderr, "[3ds] sound: %s\n", sound ? "ndsp" : "none (no sdmc:/3ds/dspfirm.cdc?): silent");
 	setDefault("SMS_NO_AUDIO", sound ? "0" : "1");
 	setDefault("SMS_AUDIO", "0");
-	setDefault("SMS_SKIP_MOVIES", "1");
+	setDefault("SMS_SKIP_MOVIES", "0");
 	setDefault("SMS_SKIP_INTRO", "1");
 	// The game's own 30 fps logic (sms-pc-port defaults to 60, twice the work per second).
 	setDefault("SMS_FRAME_RATE", "30");

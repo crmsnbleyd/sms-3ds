@@ -32,7 +32,7 @@ uint32_t g_traceLastVat;
 bool gxAsync();          // gx_fifo.cpp (3ds-05-gx-fifo.patch)
 bool gxqOnGxThread();    // gxthread.cpp
 void streamPrivate(uint8_t kind, const void* a, uint32_t na, const void* b, uint32_t nb);  // gx_fifo.cpp
-enum : uint8_t { PRIV_HUD = 16 };  // gxthread.cpp
+enum : uint8_t { PRIV_HUD = 16, PRIV_YUV };  // gxthread.cpp
 }  // namespace gx
 
 volatile uint32_t sms3ds_gx_batches_per_frame;
@@ -1554,6 +1554,79 @@ void flushBatch()
 	endFlush(tStart);
 }
 
+// A THP movie frame (patches/decomp/3ds-10: THPGXYuv2RgbDraw): its Y, U and V planes converted
+// on this thread (texture.cpp yuvTexture) and drawn as one quad over the EFB rectangle the game's
+// quad covers, in place of the game's three-texture TEV draw.
+void drawYuvFrame(const uint32_t* a)
+{
+	const uint8_t* yp = reinterpret_cast<const uint8_t*>(uintptr_t(a[0]));
+	const uint8_t* up = reinterpret_cast<const uint8_t*>(uintptr_t(a[1]));
+	const uint8_t* vp = reinterpret_cast<const uint8_t*>(uintptr_t(a[2]));
+	const uint32_t tw = a[3], th = a[4];
+	const float x = float(int32_t(a[5])), y = float(int32_t(a[6])), pw = float(int32_t(a[7])), ph = float(int32_t(a[8]));
+	flushBatch();
+	if (!s_ready)
+		return;
+	beginFrame();  // the GPU has finished the frame before: the texture can be rewritten
+	C3D_Tex* t = yuvTexture(yp, up, vp, tw, th);
+	static bool logged;
+	if (!logged) {
+		logged = true;
+		fprintf(stderr, "[gx3ds] movie frames %lux%lu at (%g,%g) %gx%g: %s\n", (unsigned long)tw, (unsigned long)th,
+		        (double)x, (double)y, (double)pw, (double)ph, t ? "converted" : "cannot convert");
+	}
+	if (!t || s_vertUsed + 4 * sizeof(OutVertex) > kVertRing || s_idxUsed + 6 * sizeof(uint16_t) > kIdxRing)
+		return;
+	OutVertex* v = (OutVertex*)(s_vertRing + s_vertUsed);
+	uint16_t* ix = (uint16_t*)(s_idxRing + s_idxUsed);
+	const float smax = float(tw) / t->width, tmax = float(th) / t->height;
+	for (int i = 0; i < 4; i++) {
+		OutVertex& o = v[i];
+		o.pos[0] = efbClipX((i & 2) ? y + ph : y);
+		o.pos[1] = efbClipY((i & 1) ? x + pw : x);
+		o.pos[2] = -0.5f;
+		o.pos[3] = 1.0f;
+		memset(o.clr, 255, 4);
+		memset(o.tc, 0, sizeof o.tc);
+		o.tc[0][0] = (i & 1) ? smax : 0.0f;
+		o.tc[0][1] = (i & 2) ? tmax : 0.0f;
+	}
+	const uint16_t q[6] = {0, 1, 2, 1, 3, 2};
+	memcpy(ix, q, sizeof q);
+	s_vertUsed += (4 * sizeof(OutVertex) + 15) & ~(size_t)15;
+	s_idxUsed += (6 * sizeof(uint16_t) + 15) & ~(size_t)15;
+
+	C3D_BindProgram(&s_prog);
+	C3D_AttrInfo* ai = C3D_GetAttrInfo();
+	AttrInfo_Init(ai);
+	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
+	AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 2);
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+	t->param = (t->param & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(GPU_TEX_2D);
+	C3D_TexBind(0, t);
+	for (int st = 0; st < 6; st++) {
+		C3D_TexEnv* e = C3D_GetTexEnv(st);
+		C3D_TexEnvInit(e);
+		C3D_TexEnvSrc(e, C3D_Both, st == 0 ? GPU_TEXTURE0 : GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+	}
+	C3D_BufInfo* bi = C3D_GetBufInfo();
+	BufInfo_Init(bi);
+	BufInfo_Add(bi, v, sizeof(OutVertex), 5, 0x43210);
+	C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, ix);
+	C3D_BindProgram(&s_gxProg);
+	vtxInvalidate();
+	s_lastPixelValid = false;
+	s_efbDirty = true;
+}
+
 void executeCopy(uint32_t ctrl)
 {
 	flushBatch();
@@ -1679,6 +1752,18 @@ int GXPC_InitAuto(float efbScale)
 }
 void GXPC_SetStretch2D(int) {}
 void GXPC_SetWide2D(int) {}
+// patches/decomp/3ds-10 (THPDraw.c): a movie frame, drawn by the GX thread in stream order.
+int sms3ds_gx_draw_yuv(const void* y, const void* u, const void* v, int tw, int th, int x, int py, int pw, int ph)
+{
+	const uint32_t a[9] = {(uint32_t)(uintptr_t)y, (uint32_t)(uintptr_t)u, (uint32_t)(uintptr_t)v, (uint32_t)tw,
+	                       (uint32_t)th, (uint32_t)x, (uint32_t)py, (uint32_t)pw, (uint32_t)ph};
+	if (gx::gxAsync() && !gx::gxqOnGxThread())
+		gx::streamPrivate(gx::PRIV_YUV, a, sizeof a, nullptr, 0);
+	else
+		gx::drawYuvFrame(a);
+	return 1;
+}
+
 void GXPC_SetHud(int on)
 {
 	// called by the game: done on the GX thread, in stream order (gxthread.cpp PRIV_HUD)

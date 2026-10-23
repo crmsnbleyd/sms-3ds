@@ -87,6 +87,9 @@ extern uint32_t g_vtxWhy;  // AX_* approximations made by the last vtxSetup
 // texture.cpp: GX texture map `map` (0..7) as a PICA texture with its wrap/filter state, or white.
 C3D_Tex* textureForMap(int map, const TexCmp& cmp);
 uint32_t gxTexBytes(uint32_t fmt, uint32_t w, uint32_t h);  // bytes of one GX texture level
+// texture.cpp: a THP movie frame (Y, U, V planes as GX I8, U and V at half size) as one RGB565
+// texture filling its top-left w x h, or null. One texture, rewritten for each frame.
+C3D_Tex* yuvTexture(const uint8_t* y, const uint8_t* u, const uint8_t* v, uint32_t w, uint32_t h);
 
 // render.cpp: the texture an EFB copy (GXCopyTex) last drew for destination `ptr`, or null.
 C3D_Tex* copyTexture(const void* ptr);

@@ -8,6 +8,7 @@
 
 #include <3ds.h>
 #include <citro3d.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unordered_map>
@@ -445,6 +446,90 @@ C3D_Tex* textureForMap(int map, const TexCmp& cmp)
 		}
 	}
 	return withSampler(&e.tex, mode0);
+}
+
+// THP movies draw their frames as three I8 textures combined by TEV stages with a signed register
+// and unclamped intermediate values (THPDraw.c THPGXYuv2RgbSetup), which the PICA's clamped
+// combiners cannot reproduce (the picture came out magenta). The frame is converted here instead,
+// with the JPEG (full-range BT.601) matrix the TEV constants approximate.
+C3D_Tex* yuvTexture(const uint8_t* yp, const uint8_t* up, const uint8_t* vp, uint32_t w, uint32_t h)
+{
+	static C3D_Tex tex;
+	static bool texOk, tables;
+	static int16_t rV[256], gU[256], gV[256], bU[256];
+	if (!tables) {
+		for (int i = 0; i < 256; i++) {
+			const float c = float(i - 128);
+			rV[i] = (int16_t)lroundf(1.402f * c);
+			gU[i] = (int16_t)lroundf(-0.344136f * c);
+			gV[i] = (int16_t)lroundf(-0.714136f * c);
+			bU[i] = (int16_t)lroundf(1.772f * c);
+		}
+		tables = true;
+	}
+	if (w < 16 || h < 8 || (w & 15) || (h & 7))  // whole 8x4 I8 tiles in all three planes
+		return nullptr;
+	const uint32_t pw = pot(w), ph = pot(h);
+	if (w > pw || h > ph)
+		return nullptr;
+	if (!texOk || tex.width != pw || tex.height != ph) {
+		if (texOk)
+			C3D_TexDelete(&tex);
+		texOk = C3D_TexInit(&tex, (u16)pw, (u16)ph, GPU_RGB565);  // linear memory: written here
+		if (!texOk)
+			return nullptr;
+		C3D_TexSetFilter(&tex, GPU_LINEAR, GPU_LINEAR);
+		C3D_TexSetWrap(&tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+	}
+	// RGB565 of (Y + chroma term) per channel, clamped: a table lookup instead of compares
+	static uint16_t r5[256 + 512], g6[256 + 512], b5[256 + 512];
+	static bool clampTables;
+	if (!clampTables) {
+		for (int i = 0; i < 256 + 512; i++) {
+			const int v = i - 256, c = v < 0 ? 0 : v > 255 ? 255 : v;
+			r5[i] = (uint16_t)((c >> 3) << 11);
+			g6[i] = (uint16_t)((c >> 2) << 5);
+			b5[i] = (uint16_t)(c >> 3);
+		}
+		clampTables = true;
+	}
+	static const uint8_t kMorton[8][8] = {
+	    {0, 1, 4, 5, 16, 17, 20, 21},     {2, 3, 6, 7, 18, 19, 22, 23},     {8, 9, 12, 13, 24, 25, 28, 29},
+	    {10, 11, 14, 15, 26, 27, 30, 31}, {32, 33, 36, 37, 48, 49, 52, 53}, {34, 35, 38, 39, 50, 51, 54, 55},
+	    {40, 41, 44, 45, 56, 57, 60, 61}, {42, 43, 46, 47, 58, 59, 62, 63},
+	};
+	uint16_t* dst = (uint16_t*)tex.data;
+	const uint32_t cw = w >> 1, ytiles = (w >> 3) * 32, ctiles = (cw >> 3) * 32;
+	for (uint32_t y = 0; y < h; y += 2) {  // two rows at a time: one row of chroma
+		// GX I8: 8x4 texel tiles of 32 bytes, in rows of tiles
+		const uint8_t* y0 = yp + (y >> 2) * ytiles + (y & 3) * 8;
+		const uint8_t* y1 = yp + ((y + 1) >> 2) * ytiles + ((y + 1) & 3) * 8;
+		const uint32_t cy = y >> 1;
+		const uint8_t* urow = up + (cy >> 2) * ctiles + (cy & 3) * 8;
+		const uint8_t* vrow = vp + (cy >> 2) * ctiles + (cy & 3) * 8;
+		// PICA rows are stored bottom-up: GX rows y, y + 1 are texture rows ph-1-y, ph-2-y
+		const uint32_t r0 = ph - 1 - y, r1 = r0 - 1;
+		uint16_t* t0 = dst + ((r0 >> 3) * (pw >> 3) << 6);
+		uint16_t* t1 = dst + ((r1 >> 3) * (pw >> 3) << 6);
+		const uint8_t* m0 = kMorton[r0 & 7];
+		const uint8_t* m1 = kMorton[r1 & 7];
+		for (uint32_t cx = 0; cx < cw; cx++) {
+			const uint32_t co = (cx >> 3) * 32 + (cx & 7);
+			const int U = urow[co], V = vrow[co];
+			const int rv = rV[V] + 256, guv = gU[U] + gV[V] + 256, bu = bU[U] + 256;
+			const uint32_t x = cx << 1, yo = (x >> 3) * 32 + (x & 7), to = (x >> 3) << 6, mx = x & 7;
+			int Y = y0[yo];
+			t0[to + m0[mx]] = r5[Y + rv] | g6[Y + guv] | b5[Y + bu];
+			Y = y0[yo + 1];
+			t0[to + m0[mx + 1]] = r5[Y + rv] | g6[Y + guv] | b5[Y + bu];
+			Y = y1[yo];
+			t1[to + m1[mx]] = r5[Y + rv] | g6[Y + guv] | b5[Y + bu];
+			Y = y1[yo + 1];
+			t1[to + m1[mx + 1]] = r5[Y + rv] | g6[Y + guv] | b5[Y + bu];
+		}
+	}
+	C3D_TexFlush(&tex);
+	return &tex;
 }
 
 }  // namespace gx3ds

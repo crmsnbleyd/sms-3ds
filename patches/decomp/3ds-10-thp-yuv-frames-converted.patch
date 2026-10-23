@@ -1,0 +1,32 @@
+--- a/libs/THPPlayer/src/THPDraw.c
++++ b/libs/THPPlayer/src/THPDraw.c
+@@ -130,10 +130,29 @@
+ 	                      GX_CH_ALPHA);
+ }
+ 
++#ifdef __3DS__
++#ifdef __cplusplus
++extern "C" {
++#endif
++int sms3ds_gx_draw_yuv(const void* y, const void* u, const void* v, int tw, int th, int x, int py, int pw,
++                       int ph);
++#ifdef __cplusplus
++}
++#endif
++#endif
++
+ void THPGXYuv2RgbDraw(u8* y_data, u8* u_data, u8* v_data, s16 x, s16 y,
+                       s16 textureWidth, s16 textureHeight, s16 polygonWidth,
+                       s16 polygonHeight)
+ {
++#ifdef __3DS__
++	// The renderer converts the frame and draws it (platform3ds/gx3ds/render.cpp): the YUV
++	// conversion THPGXYuv2RgbSetup programs needs a signed TEV register and unclamped stages, which
++	// the 3DS GPU does not have.
++	if (sms3ds_gx_draw_yuv(y_data, u_data, v_data, textureWidth, textureHeight, x, y, polygonWidth,
++	                       polygonHeight))
++		return;
++#endif
+ #ifdef TARGET_PC
+ 	if (port_draw_hd_thp(y_data, u_data, v_data, x, y, textureWidth,
+ 	                     textureHeight, polygonWidth, polygonHeight))
