@@ -56,8 +56,8 @@ See also `local/ENVIRONMENT.md` (gitignored: versions, commits, machine quirks) 
 
 ```
 CLAUDE.md               this file
-README.md               user-facing: setup, controls, known issues, building
-CONTRIBUTING.md         for people working on the port (empty for now)
+README.md               for players: setup, controls, known issues
+CONTRIBUTING.md         for people working on the port: building
 NOTICE                  MIT notice for code adapted from sms-pc-port
 CMakeLists.txt          3DS build: game + PC platform layer from refs/, our patches, platform3ds/
 cmake/patches.cmake     copy-then-patch at configure time (refs/ is never written)

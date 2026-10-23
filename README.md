@@ -11,7 +11,7 @@ This is an early hobby project. Expect bugs; see [Known issues](#known-issues).
   The original 3DS / 2DS models are not supported.
 - Your own disc image of **Super Mario Sunshine, USA/Canada (GMSE01), revision 0**.
 - The 3DS DSP firmware, for sound (see step 3 below).
-- `sms_3ds.3dsx`: download it from the Releases page, or build it yourself (see [Building](#building)).
+- `sms_3ds.3dsx`, from the Releases page.
 
 ## Setting up
 
@@ -61,23 +61,9 @@ on the GameCube) isn't possible yet.
 - Many cutscenes don't load.
 - The game runs at up to 30 fps and can slow down in busy scenes.
 
-## Building
-
-You need [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the `3ds-dev` package group, plus CMake,
-Ninja and Python 3. The build uses [sms-pc-port](https://github.com/chasem-dev/sms-pc-port) (with its `decomp`
-submodule) checked out in `refs/sms-pc-port` at the commit recorded in `CMakeLists.txt`:
-
-```sh
-git clone --recurse-submodules https://github.com/chasem-dev/sms-pc-port refs/sms-pc-port
-git -C refs/sms-pc-port checkout --recurse-submodules e3cdcca1d3a78f657d2d195c0db084bbe28c5a45
-scripts/build-3ds.sh
-```
-
-The result is `build-3ds/sms_3ds.3dsx`.
-
 ## Contributing
 
-If you'd like to work on the port, see [CONTRIBUTING.md](CONTRIBUTING.md).
+If you'd like to work on the port or build it yourself, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits and licence
 
