@@ -29,6 +29,10 @@ bool g_gxStats = false;  // gx_fifo.cpp times its vertex loader (g_decodeSeconds
 extern double g_decodeSeconds;
 double g_flushSeconds;
 uint32_t g_traceLastVat;
+bool gxAsync();          // gx_fifo.cpp (3ds-05-gx-fifo.patch)
+bool gxqOnGxThread();    // gxthread.cpp
+void streamPrivate(uint8_t kind, const void* a, uint32_t na, const void* b, uint32_t nb);  // gx_fifo.cpp
+enum : uint8_t { PRIV_HUD = 16 };  // gxthread.cpp
 }  // namespace gx
 
 volatile uint32_t sms3ds_gx_batches_per_frame;
@@ -36,6 +40,7 @@ volatile uint32_t sms3ds_gx_vertices_per_frame;
 volatile uint32_t sms3ds_gx_dropped;
 volatile float sms3ds_gx_cpu_ms, sms3ds_gx_gpu_ms;
 volatile uint32_t sms3ds_gx_tev_approx, sms3ds_gx_approx_why, sms3ds_gx_dump_request;
+volatile uint32_t sms3ds_gx_hud[3];
 volatile float sms3ds_prof_frame_ms, sms3ds_prof_flush_ms, sms3ds_prof_xform_ms, sms3ds_prof_tex_ms,
     sms3ds_prof_wait_ms, sms3ds_prof_decode_ms;
 volatile float sms3ds_prof_phase_ms[SMS3DS_PROF_PHASES];
@@ -52,6 +57,7 @@ extern "C" void sms3ds_prof_end(int phase) { s_phaseTicks[phase] += svcGetSystem
 namespace gx3ds {
 
 float g_efbScale = 0.5f, g_efbBar = 40.0f, g_efbTop = 0.0f;  // EFB -> top screen (gx3ds.h)
+float g_targetW = kScreenW;  // the width of the screen being drawn: kBottomW while the HUD draws there
 namespace {
 
 using namespace gx;
@@ -68,6 +74,12 @@ bool s_dropping;  // the current primitive went to the scratch buffer
 // --- citro3d ---------------------------------------------------------------------------------------
 bool s_ready;
 C3D_RenderTarget* s_target;
+// The bottom screen shows the game's HUD unless the debug display (hud.cpp, L+R+X) is up: then the
+// HUD stays on the top screen and the bottom screen is the console's.
+C3D_RenderTarget* s_bottom;
+bool s_bottomOut;   // s_bottom is the bottom screen's output this frame
+bool s_hudBottom;   // drawing the HUD there now (between GXPC_SetHud(1) and (0))
+C3D_RenderTarget* drawTarget() { return s_hudBottom ? s_bottom : s_target; }
 DVLB_s* s_dvlb;
 shaderProgram_s s_prog;  // side bars (passthru.v.pica)
 DVLB_s* s_gxDvlb;
@@ -112,6 +124,7 @@ inline float ticksMs(u64 t) { return (float)((double)t * 1000.0 / SYSCLOCK_ARM11
 const u32 kTransferFlags = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
                            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
                            GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+u32 s_bottomFlags;  // the same into the bottom screen's format (the console's RGB565)
 
 void freeRetired();
 void storeWriteBacks();
@@ -123,6 +136,11 @@ void beginFrame()
 	const u64 t0 = svcGetSystemTick();
 	const double flush0 = g_flushSeconds;
 	freeRetired();  // outside a frame (citro3d's rule); waits for the GPU to finish using them
+	const bool bottomOut = s_bottom && !sms3ds_hud_debug_shown;
+	if (bottomOut != s_bottomOut) {  // outside a frame too
+		C3D_RenderTargetSetOutput(bottomOut ? s_bottom : nullptr, GFX_BOTTOM, GFX_LEFT, s_bottomFlags);
+		s_bottomOut = bottomOut;
+	}
 	// No C3D_FRAME_SYNCDRAW: that also waits for the next vblank, and the game already paces itself
 	// on its own retrace timer (vi.cpp). Waits only while the GPU still draws the previous frame.
 	C3D_FrameBegin(0);
@@ -132,7 +150,9 @@ void beginFrame()
 	const u64 twb = svcGetSystemTick();
 	g_gxCount[SMS3DS_CNT_WBUS] += (uint32_t)((twb - tw) / (SYSCLOCK_ARM11 / 1000000));
 	g_gxCount[SMS3DS_CNT_BEGINWAITUS] += (uint32_t)((tw - t0) / (SYSCLOCK_ARM11 / 1000000));
-	C3D_FrameDrawOn(s_target);
+	if (s_bottomOut)  // black where the HUD draws nothing
+		C3D_RenderTargetClear(s_bottom, C3D_CLEAR_ALL, 0x000000FF, s_clearDepth);
+	C3D_FrameDrawOn(drawTarget());
 	s_vertUsed = s_idxUsed = 0;
 	if (s_arenaFull) {
 		s_arenaGen++;
@@ -182,6 +202,8 @@ void clearCopyRect()
 }
 
 // Per-fragment state from the BP registers (as gx_render.cpp applyGlState).
+void applyScissor();
+
 void applyState()
 {
 	static const GPU_TESTFUNC kCmp[8] = {GPU_NEVER, GPU_LESS, GPU_EQUAL, GPU_LEQUAL,
@@ -233,10 +255,30 @@ void applyState()
 	// inner faces of closed models and dropped the sky dome and 2D quads).
 	const uint32_t cull = (g.bp[BP_GENMODE] >> 14) & 3;
 	C3D_CullFace(cull == 1 ? GPU_CULL_FRONT_CCW : cull == 2 ? GPU_CULL_BACK_CCW : GPU_CULL_NONE);
-	// The picture is in the middle of the 400-pixel width: keep draws out of the side bars.
-	// Framebuffer coordinates are rotated (x along the screen's height, y along its width).
-	const u32 bar = (u32)(g_efbBar + 0.5f);
-	C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, bar, kScreenH, kScreenW - bar);
+	applyScissor();
+}
+
+// The GX scissor (BP 0x20/0x21: EFB coordinates + 342, inclusive), within the picture (out of the
+// side bars). Framebuffer coordinates are rotated: x = 240 - screen row, y = width - screen column
+// (gx3ds.h). The scissor box offset (BP 0x59) is not applied, as in sms-pc-port.
+uint32_t s_scissorTL = ~0u, s_scissorBR = ~0u;  // as last applied
+
+void applyScissor()
+{
+	const uint32_t tl = g.bp[BP_SCISSOR_TL], br = g.bp[BP_SCISSOR_BR];
+	s_scissorTL = tl;
+	s_scissorBR = br;
+	const float top = float(int(tl & 0x7FF) - 342), left = float(int((tl >> 12) & 0x7FF) - 342);
+	const float bottom = float(int(br & 0x7FF) - 341), right = float(int((br >> 12) & 0x7FF) - 341);
+	const float s = g_efbScale, W = g_targetW, bar = g_efbBar;
+	const float row0 = (top - g_efbTop) * s, row1 = (bottom - g_efbTop) * s;
+	const float col0 = bar + left * s, col1 = bar + right * s;
+	auto clampTo = [](float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; };
+	const u32 x0 = (u32)clampTo(floorf(kScreenH - row1), 0.0f, kScreenH);
+	const u32 x1 = (u32)clampTo(ceilf(kScreenH - row0), (float)x0, kScreenH);
+	const u32 y0 = (u32)clampTo(floorf(W - col1), bar, W - bar);
+	const u32 y1 = (u32)clampTo(ceilf(W - col0), (float)y0, W - bar);
+	C3D_SetScissor(GPU_SCISSOR_NORMAL, x0, y0, x1, y1);
 }
 
 // Solid rectangles in PICA clip space ({x0, x1, y0, y1}; x along the screen's height, y along its
@@ -579,7 +621,7 @@ void copyToTexture(uint32_t ctrl)
 	BufInfo_Init(bi);
 	BufInfo_Add(bi, v, sizeof(OutVertex), 5, 0x43210);
 	C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, ix);
-	C3D_FrameDrawOn(s_target);
+	C3D_FrameDrawOn(drawTarget());
 	C3D_BindProgram(&s_gxProg);
 	vtxInvalidate();
 	s_lastPixelValid = false;
@@ -1161,6 +1203,10 @@ void rendererInit(float)
 	C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4);  // uniform uploads per batch (skinned models) take room
 	s_target = C3D_RenderTargetCreate(kScreenH, kScreenW, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
 	C3D_RenderTargetSetOutput(s_target, GFX_TOP, GFX_LEFT, kTransferFlags);
+	s_bottom = C3D_RenderTargetCreate(kScreenH, kBottomW, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	// GSP framebuffer formats and transfer formats share their numbering
+	s_bottomFlags = (kTransferFlags & ~GX_TRANSFER_OUT_FORMAT(7)) |
+	                GX_TRANSFER_OUT_FORMAT((GX_TRANSFER_FORMAT)gfxGetScreenFormat(GFX_BOTTOM));
 	s_dvlb = DVLB_ParseFile((u32*)gx3ds_passthru_shbin, gx3ds_passthru_shbin_size);
 	shaderProgramInit(&s_prog);
 	shaderProgramSetVsh(&s_prog, &s_dvlb->DVLE[0]);
@@ -1320,8 +1366,14 @@ void appendDecoded(PrimClass cls, uint32_t fmt, uint32_t stride, const uint8_t* 
 namespace {
 // Draws `nidx` indices at `idx` (GPU-readable) over vertices at `base` in the current batch format,
 // with the current GX state.
+// The game's HUD (GXPC_SetHud: TGCConsole2 and its particles): what it costs per frame.
+bool s_hud;
+uint32_t s_hudBatches, s_hudVerts;
+u64 s_hudTicks;
+
 void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t nverts)
 {
+	const u64 tHud = svcGetSystemTick();
 	const u64 ts = svcGetSystemTick();
 	// unchanged unless something was written since, or a map's EFB copy went stale (copyTexture
 	// decides that on use, without a state write)
@@ -1336,6 +1388,8 @@ void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t 
 			g_gxCount[SMS3DS_CNT_PIXEL]++;
 			s_lastPixel = ps;
 			s_lastPixelValid = true;
+		} else if (g.bp[BP_SCISSOR_TL] != s_scissorTL || g.bp[BP_SCISSOR_BR] != s_scissorBR) {
+			applyScissor();
 		}
 		s_pixelVersion = s_stateVersion;
 	}
@@ -1370,6 +1424,11 @@ void drawWith(const uint8_t* base, const uint16_t* idx, uint32_t nidx, uint32_t 
 		sms3ds_gx_dropped = sms3ds_gx_dropped + 1;
 	s_frameBatches++;
 	s_frameVerts += nverts;
+	if (s_hud) {
+		s_hudBatches++;
+		s_hudVerts += nverts;
+		s_hudTicks += svcGetSystemTick() - tHud;
+	}
 }
 
 void endFlush(u64 tStart)
@@ -1521,6 +1580,11 @@ void executeCopy(uint32_t ctrl)
 		sms3ds_gx_vertices_per_frame = s_frameVerts;
 		sms3ds_gx_approx_why = s_frameWhy;
 		s_frameBatches = s_frameVerts = s_frameWhy = 0;
+		sms3ds_gx_hud[0] = s_hudBatches;
+		sms3ds_gx_hud[1] = s_hudVerts;
+		sms3ds_gx_hud[2] = (uint32_t)(s_hudTicks * 1000000ull / SYSCLOCK_ARM11);
+		s_hudBatches = s_hudVerts = 0;
+		s_hudTicks = 0;
 		if (s_dump) {
 			fclose(s_dump);
 			s_dump = nullptr;
@@ -1582,7 +1646,29 @@ int GXPC_InitAuto(float efbScale)
 }
 void GXPC_SetStretch2D(int) {}
 void GXPC_SetWide2D(int) {}
-void GXPC_SetHud(int) {}
+void GXPC_SetHud(int on)
+{
+	// called by the game: done on the GX thread, in stream order (gxthread.cpp PRIV_HUD)
+	if (gx::gxAsync() && !gx::gxqOnGxThread()) {
+		const uint32_t a = (uint32_t)on;
+		gx::streamPrivate(gx::PRIV_HUD, &a, sizeof a, nullptr, 0);
+		return;
+	}
+	gx::flushBatch();
+	gx::s_hud = on != 0;
+	using namespace gx3ds;
+	const bool bottom = gx::s_hud && s_bottomOut;
+	if (bottom == s_hudBottom)
+		return;
+	s_hudBottom = bottom;
+	g_targetW = bottom ? kBottomW : kScreenW;
+	g_efbBar = bottom ? 0.0f : 40.0f;
+	g_efbTop = bottom ? -16.0f : 0.0f;
+	if (s_inFrame)
+		C3D_FrameDrawOn(drawTarget());
+	vtxInvalidate();
+	s_lastPixelValid = false;
+}
 void GXPC_HudPaneBegin(float, float) {}
 void GXPC_HudPaneEnd(void) {}
 }

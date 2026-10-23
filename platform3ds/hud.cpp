@@ -1,5 +1,5 @@
-// Status display on the bottom screen (the top screen belongs to the renderer): live counters and
-// the newest log lines, hidden until L+R+X is pressed (and again to hide it). Runs on its own thread on the system core (core 1), so it keeps updating
+// Debug display on the bottom screen: live counters and the newest log lines, shown while L+R+X
+// toggles it on. Otherwise the renderer draws the game's HUD there (gx3ds/render.cpp). Runs on its own thread on the system core (core 1), so it keeps updating
 // while the game's threads hold the application core.
 #include "sms3ds.h"
 
@@ -14,6 +14,7 @@ volatile uint32_t sms3ds_gx_frames;
 volatile uint32_t sms3ds_gx_copies;
 volatile uint32_t sms3ds_gx_primitives;
 volatile uint32_t sms3ds_gx_vertices;
+volatile uint32_t sms3ds_hud_debug_shown;
 extern "C" volatile Sms3dsHid sms3ds_remote_pad;  // hid_3ds.cpp: scripts/azahar.py's buttons
 
 namespace {
@@ -112,16 +113,18 @@ void hudThread(void*)
 		                   (remote & (SMS3DS_L | SMS3DS_R | SMS3DS_X)) == (SMS3DS_L | SMS3DS_R | SMS3DS_X);
 		const bool toggled = combo && !comboWas;
 		comboWas = combo;
-		if (toggled)
+		if (toggled) {
 			shown = !shown;
-		if (toggled || (shown && tick % 5 == 0)) {
+			sms3ds_hud_debug_shown = shown;
+			if (shown)  // the renderer lets go of the bottom screen at its next frame
+				svcSleepThread(100 * 1000 * 1000LL);
+		}
+		if (shown && (toggled || tick % 5 == 0)) {
 			consoleSelect(&s_bottom);
-			if (shown) {
-				drawBottom();
-				drawLog();
-			} else {
+			if (toggled)
 				consoleClear();
-			}
+			drawBottom();
+			drawLog();
 			gfxFlushBuffers();
 			gfxScreenSwapBuffers(GFX_BOTTOM, false);
 		}
@@ -150,7 +153,10 @@ extern "C" void sms3ds_hud_start(void)
 extern "C" void sms3ds_hud_fatal(const char* msg)
 {
 	fprintf(stderr, "%s\n", msg);
+	sms3ds_hud_debug_shown = 1;
+	svcSleepThread(100 * 1000 * 1000LL);
 	consoleSelect(&s_bottom);
+	consoleClear();
 	put("\x1b[14;1H\x1b[31m%.40s\x1b[0m", msg);
 	while (aptMainLoop()) {
 		drawLog();

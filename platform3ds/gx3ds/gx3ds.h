@@ -96,12 +96,14 @@ C3D_Tex* copyTexture(const void* ptr);
 // Exactly half keeps EFB copies exact (the goop map goes through the EFB every frame). At the end of
 // a frame render.cpp presentPicture stretches the rows the display copy takes (0-447 in game) to fill
 // the screen's 240 lines. vtx.cpp setFinal, copies and clears follow this mapping.
-enum { kScreenW = 400, kScreenH = 240 };
-extern float g_efbScale, g_efbBar, g_efbTop;
+// The game's HUD (GXPC_SetHud) goes to the 320 x 240 bottom screen instead, at the same half size:
+// g_targetW 320, g_efbBar 0, g_efbTop -16 (its 448 rows centred in the 240 lines).
+enum { kScreenW = 400, kScreenH = 240, kBottomW = 320 };
+extern float g_efbScale, g_efbBar, g_efbTop, g_targetW;
 // PICA clip coordinates of EFB rows and columns (the framebuffer is rotated: clip x runs down the
 // screen's height, clip y across its width).
 inline float efbClipX(float ey) { return 1.0f - 2.0f * g_efbScale * (ey - g_efbTop) / kScreenH; }
-inline float efbClipY(float ex) { return 1.0f - 2.0f * (g_efbBar + ex * g_efbScale) / kScreenW; }
+inline float efbClipY(float ex) { return 1.0f - 2.0f * (g_efbBar + ex * g_efbScale) / g_targetW; }
 
 }  // namespace gx3ds
 

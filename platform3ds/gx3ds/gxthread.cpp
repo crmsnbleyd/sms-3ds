@@ -41,6 +41,7 @@ extern double g_flushSeconds, g_decodeSeconds;
 enum : uint8_t {  // private records (gx_api.cpp, gx_fifo.cpp)
 	PRIV_SIDE = 1, PRIV_CALLDL, PRIV_INVTEX, PRIV_ARRAY,
 	PRIV_BE_ADD = 8, PRIV_BE_REMOVE, PRIV_ARRAY_BE, PRIV_DEFAULT_BE,
+	PRIV_HUD = 16,  // render.cpp GXPC_SetHud
 };
 }  // namespace gx
 
@@ -49,6 +50,7 @@ void GXPC_AddBigEndianRange(const void* p, uint32_t size);
 void GXPC_RemoveBigEndianRange(const void* p);
 void GXPC_SetArrayBigEndian(int attr, int bigEndian);
 void GXPC_SetDefaultArrayBigEndian(int bigEndian);
+void GXPC_SetHud(int on);
 }
 
 namespace {
@@ -319,6 +321,7 @@ void gxqPrivate(uint8_t kind, const uint8_t* payload, uint32_t n)
 	case PRIV_BE_REMOVE: GXPC_RemoveBigEndianRange(reinterpret_cast<const void*>(uintptr_t(a[0]))); break;
 	case PRIV_ARRAY_BE: GXPC_SetArrayBigEndian((int)a[0], (int)a[1]); break;
 	case PRIV_DEFAULT_BE: GXPC_SetDefaultArrayBigEndian((int)a[0]); break;
+	case PRIV_HUD: GXPC_SetHud((int)a[0]); break;
 	default: logmsg("unknown GX thread record %u", kind); break;
 	}
 }

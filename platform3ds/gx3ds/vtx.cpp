@@ -82,7 +82,7 @@ void setFinal()
 	const float s = g_efbScale;
 	const float M[4][4] = {
 	    {0.0f, -2.0f * s * vp[1] / kScreenH, 0.0f, efbClipX(vpy)},
-	    {-2.0f * s * vp[0] / kScreenW, 0.0f, 0.0f, efbClipY(vpx)},
+	    {-2.0f * s * vp[0] / g_targetW, 0.0f, 0.0f, efbClipY(vpx)},
 	    {0.0f, 0.0f, -vp[2] / S, -vp[5] / S},
 	    {0.0f, 0.0f, 0.0f, 1.0f},
 	};

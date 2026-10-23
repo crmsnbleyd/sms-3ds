@@ -50,7 +50,7 @@ Your saves go to `/3ds/sms-3ds/card-a/` on the SD card.
 | ZL or ZR | Z |
 | START | START |
 | D-Pad | D-Pad |
-| L + R + X | Show or hide debug information on the lower screen |
+| L + R + X | Swap the lower screen between the HUD and debug information |
 | START + SELECT | Quit |
 
 L and R are always pressed fully, so R sprays from a standing position. Walking while spraying (a half-pressed R

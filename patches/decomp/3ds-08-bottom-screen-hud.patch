@@ -1,0 +1,167 @@
+--- a/src/System/EmitterViewObj.cpp
++++ b/src/System/EmitterViewObj.cpp
+@@ -91,12 +91,28 @@
+ 	if (cue & CUE_DRAW) {
+ 		JPADrawInfo drawInfo(graphics->getViewMtx());
+ #ifdef TARGET_PC
++#ifdef __3DS__
++		// The 3DS draws the HUD on the bottom screen. This manager also draws the game's own 2D
++		// effects (the save block's hit sparkles, the plaza's opening colours), which stay on the
++		// top screen: only the HUD's emitters, in their own group (GCConsole2.cpp), are HUD.
++		if (unk10 == gpEmitterManager4D2) {
++			for (u8 group = 0; group < 8; ++group)
++				if (group != 1)  // GCConsole2.cpp kHudEmitterGroup
++					unk10->draw(&drawInfo, group);
++			GXPC_SetHud(1);
++			unk10->draw(&drawInfo, 1);
++			GXPC_SetHud(0);
++		} else {
++			unk10->draw(&drawInfo);
++		}
++#else
+ 		bool hud = unk10 == gpEmitterManager4D2;
+ 		if (hud)
+ 			GXPC_SetHud(1);
+ 		unk10->draw(&drawInfo);
+ 		if (hud)
+ 			GXPC_SetHud(0);
++#endif
+ #else
+ 		unk10->draw(&drawInfo);
+ #endif
+--- a/src/GC2D/GCConsole2.cpp
++++ b/src/GC2D/GCConsole2.cpp
+@@ -68,6 +68,32 @@
+ 
+ extern JPAEmitterManager* gpEmitterManager4D2;
+ 
++// The HUD's own particles (the counters' digit puffs, the water gauge's sparkles). The 3DS draws
++// the HUD on the bottom screen, so they go in their own emitter group, which EmitterViewObj.cpp
++// draws as HUD; the game's other 2D effects stay in group 0, on the top screen.
++#ifdef __3DS__
++static const u8 kHudEmitterGroup = 1;
++static bool createHudEmitter(JPAEmitterManager* manager, const JGeometry::TVec3<f32>& pos, s32 id,
++                             JPACallBackBase<JPABaseEmitter*>* cb,
++                             JPACallBackBase2<JPABaseEmitter*, JPABaseParticle*>* cb2)
++{
++	// as JPAEmitterManager::createEmitter, in the HUD's group
++	JPABaseEmitter* emitter = manager->createSimpleEmitterID(pos, id, kHudEmitterGroup, 0, cb, cb2);
++	if (!emitter)
++		return false;
++	manager->unkC4       = 1;
++	manager->unkC8[0][0] = emitter;
++	return true;
++}
++#else
++static inline bool createHudEmitter(JPAEmitterManager* manager, const JGeometry::TVec3<f32>& pos, s32 id,
++                                    JPACallBackBase<JPABaseEmitter*>* cb,
++                                    JPACallBackBase2<JPABaseEmitter*, JPABaseParticle*>* cb2)
++{
++	return manager->createEmitter(pos, id, cb, cb2);
++}
++#endif
++
+ // rogue includes needed for matching sinit & bss
+ #include <MSound/MSSetSound.hpp>
+ #include <MSound/MSoundBGM.hpp>
+@@ -331,7 +357,7 @@
+ 	JUTRect bounds(pane->getPane()->mGlobalBounds);
+ 	JGeometry::TVec3<f32> position(bounds.x1 + bounds.getWidth() * 0.5f,
+ 	                               bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+-	gpEmitterManager4D2->createEmitter(position, 0x1FC, nullptr, nullptr);
++	createHudEmitter(gpEmitterManager4D2, position, 0x1FC, nullptr, nullptr);
+ }
+ 
+ // fabricated: the coin counter's "swap the digit texture and puff a particle
+@@ -347,7 +373,7 @@
+ 	bounds = pane->getPane()->getGlobalBounds();
+ 	position.set(bounds.x1 + bounds.getWidth() * 0.5f,
+ 	             bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+-	manager->createEmitter(position, 0x1FC, nullptr, nullptr);
++	createHudEmitter(manager, position, 0x1FC, nullptr, nullptr);
+ }
+ 
+ // fabricated
+@@ -1118,16 +1144,16 @@
+ 
+ 	JGeometry::TVec3<f32> emitterPos(-20.0f, -20.0f, 0.0f);
+ 
+-	gpEmitterManager4D2->createEmitter(emitterPos, 0x1FB, nullptr, nullptr);
++	createHudEmitter(gpEmitterManager4D2, emitterPos, 0x1FB, nullptr, nullptr);
+ 	unk124                  = gpEmitterManager4D2->unkC8[0][0];
+ 	unk124->setRate(0.01f);
+ 
+-	gpEmitterManager4D2->createEmitter(emitterPos, 0x1FB, nullptr, nullptr);
++	createHudEmitter(gpEmitterManager4D2, emitterPos, 0x1FB, nullptr, nullptr);
+ 	unk164 = gpEmitterManager4D2->unkC8[0][0];
+ 	unk164->setStatus(JPABaseEmitter::STATUS_STOP_EMIT);
+ 	unk164->setRate(0.012f);
+ 
+-	gpEmitterManager4D2->createEmitter(emitterPos, 0x1FB, nullptr, nullptr);
++	createHudEmitter(gpEmitterManager4D2, emitterPos, 0x1FB, nullptr, nullptr);
+ 	unk144 = gpEmitterManager4D2->unkC8[0][0];
+ 	unk144->setStatus(JPABaseEmitter::STATUS_STOP_EMIT);
+ 
+@@ -2502,7 +2528,7 @@
+ 	JGeometry::TVec3<f32> position(bounds.x1 + bounds.getWidth() * 0.5f,
+ 	                               bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+ 	JPAEmitterManager* manager = gpEmitterManager4D2;
+-	manager->createEmitter(position, 0x1FC, nullptr, nullptr);
++	createHudEmitter(manager, position, 0x1FC, nullptr, nullptr);
+ }
+ 
+ // TODO: frame 0x50 short, instructions exact. The getWhite()/mWhite temps sit
+@@ -2742,7 +2768,7 @@
+ 			position.x = bounds.x1 + bounds.getWidth() * 0.5f;
+ 			position.y = bounds.y1 + bounds.getHeight() * 0.5f;
+ 			position.z = 0.0f;
+-			gpEmitterManager4D2->createEmitter(position, 0x1FC, nullptr,
++			createHudEmitter(gpEmitterManager4D2, position, 0x1FC, nullptr,
+ 			                                   nullptr);
+ 
+ 			if (blueCoins % 10 == 0) {
+@@ -2751,7 +2777,7 @@
+ 				position.y = bounds.y1 + bounds.getHeight() * 0.5f;
+ 				position.z = 0.0f;
+ 				JPAEmitterManager* manager = gpEmitterManager4D2;
+-				manager->createEmitter(position, 0x1FC, nullptr, nullptr);
++				createHudEmitter(manager, position, 0x1FC, nullptr, nullptr);
+ 			}
+ 		} else {
+ 			startAppearStar();
+@@ -3857,8 +3883,14 @@
+ 				console->unk1C4->getPane()->setAlpha(0);
+ 			console->unk84 = 0;
+ 			console->unk18 = 4;
++#ifdef __3DS__
++		// The HUD is on the bottom screen, out of the way: the life meter stays up at full health
++		// too (retail shows it only below 8 and slides it off again once full, case 2).
++		} else if (!airMode && !console->unk1C4->getPane()->isVisible() && amount != 0) {
++#else
+ 		} else if (!airMode && console->unk1CC[0] < 8
+ 		           && !console->unk1C4->getPane()->isVisible() && amount != 0) {
++#endif
+ 			console->startAppearLife(0);
+ 			console->unk18 = 1;
+ 		}
+@@ -3872,7 +3904,11 @@
+ 			console->unk18 = 3;
+ 		break;
+ 	case 2:
++#ifdef __3DS__
++		if (false) {  // full health keeps the meter up (case 0)
++#else
+ 		if (console->unk1CC[0] == 8) {
++#endif
+ 			console->startDisappearLife(0);
+ 			console->unk18 = 3;
+ 		} else if (airTimeout) {
+@@ -4416,7 +4452,7 @@
+ 			JGeometry::TVec3<f32> position;
+ 			position.set(bounds.x1 + bounds.getWidth() * 0.5f,
+ 			             bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+-			manager->createEmitter(position, 0x1FC, nullptr, nullptr);
++			createHudEmitter(manager, position, 0x1FC, nullptr, nullptr);
+ 		}
+ 		console->unk444 = redCoins;
+ 	}
