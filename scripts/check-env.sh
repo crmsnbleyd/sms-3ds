@@ -114,7 +114,7 @@ fi
 # --- distribution hygiene ----------------------------------------------------
 section "Git hygiene (no disc images or Nintendo-derived files tracked)"
 cd "$ROOT"
-bad_ext='\.(iso|gcm|ciso|gcz|rvz|wia|wbfs|nkit\.[a-z]+|cia|3dsx|3ds|cci|elf|smdh|szs|arc|rarc|bmd|bdl|bti|bck|bca|blk|btp|brk|btk|bpk|bmt|col|thp|afc|ast|aw|bms|bnr|dol|rel|t3x|bcstm|bcwav)$'
+bad_ext='\.(iso|gcm|ciso|gcz|rvz|wia|wbfs|nkit\.[a-z]+|cia|3dsx|3ds|cci|elf|smdh|szs|arc|rarc|bmd|bdl|bti|bck|bca|blk|btp|brk|btk|bpk|bmt|col|thp|afc|ast|aw|bms|bnr|dol|rel|t3x|bcstm|bcwav|cdc)$'
 tracked=$( { git ls-files; git diff --cached --name-only; } | sort -u)
 hits=$(printf '%s\n' "$tracked" | grep -iE "$bad_ext|^(refs|rom|local|build[^/]*)/" || true)
 if [[ -n "$hits" ]]; then fail "forbidden paths tracked or staged:"; sed 's/^/          /' <<<"$hits"
@@ -131,10 +131,10 @@ while IFS= read -r f; do
 done <<<"$tracked"
 if ((${#magic_hits[@]})); then fail "files with Nintendo/disc magic tracked:"; printf '          %s\n' "${magic_hits[@]}"
 else ok "no tracked file has CISO/disc/Yaz0/RARC/THP/J3D magic"; fi
-for p in refs/x rom/x.iso build-pc/x local/x x.ciso x.3dsx x.cia; do
+for p in refs/x rom/x.iso build-pc/x local/x x.ciso x.3dsx x.cia x.cdc; do
   git check-ignore -q "$p" || fail ".gitignore does not cover $p"
 done
-ok ".gitignore covers refs/ rom/ build*/ local/ *.ciso *.3dsx *.cia (spot check)"
+ok ".gitignore covers refs/ rom/ build*/ local/ *.ciso *.3dsx *.cia *.cdc (spot check)"
 
 # --- disc image (optional) ---------------------------------------------------
 if ((CHECK_ROM)); then

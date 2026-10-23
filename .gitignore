@@ -15,6 +15,7 @@ rom/
 build*/
 *.3dsx
 *.cia
+*.cdc
 *.3ds
 *.cci
 *.elf

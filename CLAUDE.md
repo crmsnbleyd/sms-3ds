@@ -28,7 +28,8 @@ See also `local/ENVIRONMENT.md` (gitignored: versions, commits, machine quirks) 
 
 - Distribute **only source code plus a browser-based asset converter** (the user converts their own disc).
 - **Never commit, bundle or upload**: the ISO/CISO, anything extracted or converted from it (textures, models, audio,
-  `.szs`/`.arc`/`.bmd`/`.bti`/`.thp`/…), compiled game binaries (`.elf`, `.3dsx`), CIAs, or the PC port's `SMS.app`/standalone builds.
+  `.szs`/`.arc`/`.bmd`/`.bti`/`.thp`/…), compiled game binaries (`.elf`, `.3dsx`), CIAs, the PC port's `SMS.app`/standalone builds,
+  or the 3DS DSP firmware (`dspfirm.cdc`, dumped from the user's console for ndsp).
 - Do not copy the PC port's game screenshots (`platform/gx/shots/*.png`) or any other retail-derived imagery.
 - `scripts/check-env.sh` fails if git tracks any of these (by extension, path, or file magic).
 
