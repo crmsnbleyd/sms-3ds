@@ -1,0 +1,94 @@
+--- a/src/MoveBG/MapObjGrass.cpp
++++ b/src/MoveBG/MapObjGrass.cpp
+@@ -210,16 +210,91 @@
+ // carrier) reserves with no code at all in either copy; initDrawFar() carries
+ // it identically, so the site is not distinguishable from the binary.
+ // TODO: what retail actually did with it is unknown -- nothing reads it.
++#ifdef __3DS__
++// Every grass group is drawn every frame, three vertices a blade written one call at a time; a
++// field of them (stage 23: ~250,000 vertices a frame) took 52 ms of the 3DS's game thread. Groups
++// whose bounding sphere is outside the camera's view are skipped: nothing on screen changes.
++// The spheres are computed once per group (the blades do not move but for the sway).
++static const TMapObjGrassManager* sGrassCullOwner;
++extern "C" volatile int sms3ds_grass_nocull;  // debugging: 1 draws every group (platform3ds/stubs_3ds.cpp)
++static f32 sGrassRadius[500];
++static bool sGrassRadiusKnown[500];
++
++static f32 grassRadius(const TMapObjGrassGroup* group, int index)
++{
++	if (index >= 500)
++		return 1e30f;
++	if (!sGrassRadiusKnown[index]) {
++		const Vec& c = group->mPosition;
++		f32 r2 = 0.0f;
++		for (int i = 0; i < group->unk68; ++i) {
++			const f32 dx = group->unk6C[i].x - c.x, dz = group->unk6C[i].z - c.z;
++			f32 dy = group->unk6C[i].y - c.y;
++			const f32 dyFar = group->unk74[i] - c.y;  // the far blades' tips
++			if (dyFar > dy)
++				dy = dyFar;
++			const f32 d2 = dx * dx + dy * dy + dz * dz;
++			if (d2 > r2)
++				r2 = d2;
++		}
++		// the sway and the blade width on top
++		sGrassRadius[index] = sqrtf(r2) + TMapObjGrassManager::mWidth + 200.0f;
++		sGrassRadiusKnown[index] = true;
++	}
++	return sGrassRadius[index];
++}
++
++// GX view space looks down -z; a sphere is outside when it is wholly behind the camera or beyond
++// a side of the view (the field of view widened by the sphere's radius).
++static bool grassVisible(const TMapObjGrassGroup* group, int index, MtxPtr view, f32 tanY, f32 tanX)
++{
++	if (sms3ds_grass_nocull)
++		return true;
++	const f32 r = grassRadius(group, index);
++	Vec p;
++	MTXMultVec(view, &group->mPosition, &p);
++	const f32 depth = -p.z;
++	if (depth < -r)
++		return false;
++	const f32 slackX = r * sqrtf(1.0f + tanX * tanX), slackY = r * sqrtf(1.0f + tanY * tanY);
++	if (p.x > depth * tanX + slackX || -p.x > depth * tanX + slackX)
++		return false;
++	if (p.y > depth * tanY + slackY || -p.y > depth * tanY + slackY)
++		return false;
++	return true;
++}
++#endif
++
+ void TMapObjGrassManager::draw() const
+ {
+ 	JGeometry::SMatrix34C<f32> scratch;
++#ifdef __3DS__
++	if (sGrassCullOwner != this) {  // a new area's manager: its groups are new
++		sGrassCullOwner = this;
++		for (int i = 0; i < 500; ++i)
++			sGrassRadiusKnown[i] = false;
++	}
++	MtxPtr view = j3dSys.getViewMtx();
++	const f32 tanY = tanf(gpCamera->getFovy() * (3.14159265f / 360.0f));
++	const f32 tanX = tanY * gpCamera->getAspect();
+ 	initDrawNear();
+ 	for (int i = 0; i < unk10; ++i)
++		if (unk14[i]->shouldDrawNear() && grassVisible(unk14[i], i, view, tanY, tanX))
++			unk14[i]->drawNear();
++
++	initDrawFar();
++	for (int i = 0; i < unk10; ++i)
++		if (unk14[i]->shouldDrawFar() && grassVisible(unk14[i], i, view, tanY, tanX))
++			unk14[i]->drawFar();
++#else
++	initDrawNear();
++	for (int i = 0; i < unk10; ++i)
+ 		unk14[i]->drawNear();
+ 
+ 	initDrawFar();
+ 	for (int i = 0; i < unk10; ++i)
+ 		unk14[i]->drawFar();
++#endif
+ }
+ 
+ #ifdef TARGET_PC

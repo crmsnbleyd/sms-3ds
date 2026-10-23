@@ -59,3 +59,7 @@ void port_savestate_hint(PortSaveStateHint* out)
 BOOL port_draw_hd_thp(u8*, u8*, u8*, s16, s16, s16, s16, s16, s16) { return FALSE; }
 const char* port_hd_cutscene_directory(void) { return NULL; }
 void port_window_icon_init(void) {}
+
+// Debugging (patches/decomp/3ds-11): 1 turns grass culling off, written over Azahar's RPC.
+extern "C" volatile int sms3ds_grass_nocull;
+volatile int sms3ds_grass_nocull;
