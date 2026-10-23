@@ -24,6 +24,12 @@
 
 #include "dsp_mixer.h"
 
+// For scripts/azahar.py: voices this subframe, channels holding a voice, buffers queued in all,
+// buffers dropped (the DSP that far behind), audible voices left without a channel, ndsp frames run,
+// ndsp frames dropped.
+extern "C" volatile uint32_t sms3ds_audio_stats[8];
+volatile uint32_t sms3ds_audio_stats[8];
+
 namespace {
 
 // --- game-side blocks (host byte order), as dsp_mixer.cpp --------------------------------------
@@ -88,13 +94,14 @@ const float kDacRate = 32028.5f;                        // JASRate.cpp
 // --- ndsp channels ---------------------------------------------------------------------------------
 enum {
 	kChannels = 24,
-	kBufs = 4,            // queued buffers per channel (~3 x 17.5 ms ahead of playback)
+	kBufs = 8,            // queued buffers per channel: room for the game's audio catching up in a burst
 	kSubPerBuf = 7,       // subframes per buffer: one JAudio frame
-	kBufSamples = 4608,   // 7 x 80 at the maximum ratio (0x7FFF, 8x) plus slack
+	kBufSamples = 2048,   // 7 x 80 up to a ratio of 3.6; higher pitches submit after fewer subframes
 };
 struct Chan {
 	int voice = -1;  // the voice it plays, or -1 (free, or still playing out a finished voice)
-	int16_t* mem = nullptr;
+	float rate = -1.0f, mixL = -1.0f, mixR = -1.0f;  // as last set (ndsp calls only on change)
+	uint32_t gen = 0;  // bumped by chanReset: a buffer queued for its previous use is not added
 	ndspWaveBuf wb[kBufs];
 	int next = 0;
 };
@@ -307,6 +314,50 @@ bool is_oscillator(uint16_t t) { return t == kOscSquare || t == kOscSaw || t == 
 bool supported(uint16_t t) { return t == 9 || t == 5 || t == 8 || t == 16 || t == kDirectPcm || is_oscillator(t); }
 
 // --- channels --------------------------------------------------------------------------------------
+// The samples of every queued buffer, in one ring in linear memory: the buffers a render call fills
+// lie next to each other, so the data cache is flushed once per call (a flush per buffer was 1 ms a
+// frame). A buffer plays for about 17.5 ms and a channel holds at most kBufs, so the ring (~1.2 s of
+// data at the plaza's rate) is never written where a queued buffer still waits.
+const uint32_t kRingSamples = 512 * 1024;
+int16_t* s_ring;
+uint32_t s_ringHead, s_flushFrom;
+struct Pending {
+	int chan;
+	uint32_t gen;
+	ndspWaveBuf* wb;
+};
+Pending s_pending[64];
+int s_npending;
+
+void flushRing(uint32_t from, uint32_t to)
+{
+	if (to > from)
+		DSP_FlushDataCache(s_ring + from, (to - from) * sizeof(int16_t));
+}
+
+int16_t* ringTake(uint32_t n)
+{
+	if (s_ringHead + n > kRingSamples) {  // wrap: what this call wrote before the end goes out now
+		flushRing(s_flushFrom, s_ringHead);
+		s_ringHead = s_flushFrom = 0;
+	}
+	int16_t* p = s_ring + s_ringHead;
+	s_ringHead += n;
+	return p;
+}
+
+// After a render call: one flush, then the buffers it filled go to their channels.
+void addPending()
+{
+	flushRing(s_flushFrom, s_ringHead);
+	s_flushFrom = s_ringHead;
+	for (int i = 0; i < s_npending; i++) {
+		const Pending& p = s_pending[i];
+		if (g.chan[p.chan].gen == p.gen)
+			ndspChnWaveBufAdd(p.chan, p.wb);
+	}
+	s_npending = 0;
+}
 bool chanIdle(int c)
 {
 	for (int b = 0; b < kBufs; b++)
@@ -321,11 +372,11 @@ void chanReset(int c)
 	ndspChnSetInterp(c, NDSP_INTERP_POLYPHASE);
 	ndspChnSetFormat(c, NDSP_FORMAT_MONO_PCM16);
 	Chan& ch = g.chan[c];
-	for (int b = 0; b < kBufs; b++) {
+	for (int b = 0; b < kBufs; b++)
 		memset(&ch.wb[b], 0, sizeof ch.wb[b]);
-		ch.wb[b].data_pcm16 = ch.mem + b * kBufSamples;
-	}
 	ch.next = 0;
+	ch.gen++;
+	ch.rate = ch.mixL = ch.mixR = -1.0f;
 }
 
 // Lets a voice's channel play out what it has queued (a finished one-shot) or stops it at once.
@@ -387,22 +438,32 @@ void submit(int vi, const Voice& v)
 	}
 	Chan& ch = g.chan[d.chan];
 	ndspWaveBuf& wb = ch.wb[ch.next];
-	if (wb.status == NDSP_WBUF_QUEUED || wb.status == NDSP_WBUF_PLAYING) {
+	if (wb.status == NDSP_WBUF_QUEUED || wb.status == NDSP_WBUF_PLAYING || s_npending == 64) {
 		g.overruns++;  // the DSP is that far behind: drop rather than wait
 		return;
 	}
-	memcpy((void*)wb.data_pcm16, d.stage, n * sizeof(int16_t));
-	DSP_FlushDataCache(wb.data_pcm16, n * sizeof(int16_t));
+	int16_t* dst = ringTake(n);
+	memcpy(dst, d.stage, n * sizeof(int16_t));
+	memset(&wb, 0, sizeof wb);
+	wb.data_pcm16 = dst;
 	wb.nsamples = n;
 	wb.looping = false;
 	const float rate = is_oscillator(v.sourceType) ? kDacRate : kDacRate * (float)v.ratio / 4096.0f;
-	ndspChnSetRate(d.chan, rate);
-	float mix[12] = {};
-	mix[0] = d.gainL;
-	mix[1] = d.gainR;
-	ndspChnSetMix(d.chan, mix);
-	ndspChnWaveBufAdd(d.chan, &wb);
+	if (rate != ch.rate) {
+		ch.rate = rate;
+		ndspChnSetRate(d.chan, rate);
+	}
+	if (d.gainL != ch.mixL || d.gainR != ch.mixR) {
+		ch.mixL = d.gainL;
+		ch.mixR = d.gainR;
+		float mix[12] = {};
+		mix[0] = d.gainL;
+		mix[1] = d.gainR;
+		ndspChnSetMix(d.chan, mix);
+	}
+	s_pending[s_npending++] = Pending{d.chan, ch.gen, &wb};
 	ch.next = (ch.next + 1) % kBufs;
+	sms3ds_audio_stats[2] = sms3ds_audio_stats[2] + 1;
 }
 
 // --- one subframe of one voice ---------------------------------------------------------------------
@@ -548,14 +609,13 @@ extern "C" bool sms3ds_ndsp_init(void)
 	ndspSetOutputMode(NDSP_OUTPUT_STEREO);
 	ndspSetOutputCount(1);
 	ndspSetMasterVol(1.0f);
-	for (int c = 0; c < kChannels; c++) {
-		g.chan[c].mem = (int16_t*)linearAlloc(kBufs * kBufSamples * sizeof(int16_t));
-		if (!g.chan[c].mem) {
-			ndspExit();
-			return false;
-		}
-		chanReset(c);
+	s_ring = (int16_t*)linearAlloc(kRingSamples * sizeof(int16_t));
+	if (!s_ring) {
+		ndspExit();
+		return false;
 	}
+	for (int c = 0; c < kChannels; c++)
+		chanReset(c);
 	for (int i = 0; i < 64; i++)
 		g.dec[i].chan = -1;
 	g.ndspOk = true;
@@ -620,6 +680,21 @@ extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t
 			}
 			render_voice((int)i, n, m);
 		}
+	if (g.ndspOk)
+		addPending();
+	{
+		int used = 0;
+		for (int c = 0; c < kChannels; c++)
+			used += g.chan[c].voice >= 0;
+		sms3ds_audio_stats[0] = (uint32_t)g.active;
+		sms3ds_audio_stats[1] = (uint32_t)used;
+		sms3ds_audio_stats[3] = g.overruns;
+		sms3ds_audio_stats[4] = g.unassigned;
+		if (g.ndspOk) {
+			sms3ds_audio_stats[5] = ndspGetFrameCount();
+			sms3ds_audio_stats[6] = ndspGetDroppedFrames();
+		}
+	}
 	if (g.trace && ++g.traceTick % 2000 == 0) {
 		int used = 0;
 		for (int c = 0; c < kChannels; c++)

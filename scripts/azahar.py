@@ -133,6 +133,8 @@ def cmd_hud():
         ("write-back us / begin wait us", "%d / %d" % read(c, "sms3ds_gx_count", "8I")[6:]),
         ("write-back tiles re-encoded", read(c, "sms3ds_gx_count", "8I")[5]),
         ("tev compiles / xf-only set-ups", "%d / %d" % read(c, "sms3ds_gx_count", "10I")[8:]),
+        ("audio: voices / channels / bufs / overruns / no-chan / ndsp frames / dropped",
+         " / ".join(str(x) for x in read(c, "sms3ds_audio_stats", "7I"))),
         ("approx why", "%05x" % u("sms3ds_gx_approx_why")),
     ]
     st = rpc().perf_stats()
