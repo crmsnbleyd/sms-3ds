@@ -75,6 +75,12 @@ bool s_dropping;  // the current primitive went to the scratch buffer
 // --- citro3d ---------------------------------------------------------------------------------------
 bool s_ready;
 C3D_RenderTarget* s_target;
+// the depth buffer as the GPU left it at the end of a frame (peekZ): written alternately, published
+// at the next frame's start (C3D_FrameBegin has then waited for the GPU)
+uint8_t* s_depthSnap[2];
+int s_depthWrite, s_depthPending = -1;
+volatile int s_depthReady = -1;
+const uint32_t kDepthBytes = kScreenH * kScreenW * 4;
 // The bottom screen shows the game's HUD unless the debug display (hud.cpp, L+R+X) is up: then the
 // HUD stays on the top screen and the bottom screen is the console's.
 C3D_RenderTarget* s_bottom;
@@ -145,6 +151,10 @@ void beginFrame()
 	// No C3D_FRAME_SYNCDRAW: that also waits for the next vblank, and the game already paces itself
 	// on its own retrace timer (vi.cpp). Waits only while the GPU still draws the previous frame.
 	C3D_FrameBegin(0);
+	if (s_depthPending >= 0) {
+		s_depthReady = s_depthPending;
+		s_depthPending = -1;
+	}
 	const u64 tw = svcGetSystemTick();
 	s_tWait += tw - t0;
 	storeWriteBacks();
@@ -1260,6 +1270,8 @@ void rendererInit(float)
 		}
 	}
 	s_efbTexOk = C3D_TexInitVRAM(&s_efbTex, 256, 512, GPU_RGBA8);
+	for (int i = 0; i < 2; i++)
+		s_depthSnap[i] = (uint8_t*)linearAlloc(kDepthBytes);
 	s_ready = s_target && s_vertRing && s_idxRing;
 	if (s_ready && s_efbTexOk)
 		calibrateCopies();
@@ -1649,6 +1661,14 @@ void executeCopy(uint32_t ctrl)
 		sms3ds_gx_frames = sms3ds_gx_frames + 1;
 		if (s_inFrame) {
 			presentPicture();  // also paints the side bars
+			if (s_depthSnap[s_depthWrite]) {  // for peekZ
+				const u32 line = kScreenH * 8 * 4 / 16;  // one row of 8x8 tiles, in 16-byte units
+				C3D_SyncTextureCopy((u32*)s_target->frameBuf.depthBuf, GX_BUFFER_DIM(line, 0),
+				                    (u32*)s_depthSnap[s_depthWrite], GX_BUFFER_DIM(line, 0), kDepthBytes,
+				                    GX_TRANSFER_RAW_COPY(1));
+				s_depthPending = s_depthWrite;
+				s_depthWrite ^= 1;
+			}
 			// the CPU wrote this frame's vertices and indices through the data cache
 			GSPGPU_FlushDataCache(s_vertRing, s_vertUsed);
 			GSPGPU_FlushDataCache(s_idxRing, s_idxUsed);
@@ -1729,7 +1749,30 @@ void executeCopy(uint32_t ctrl)
 }
 
 uint32_t peekColor(int, int) { return 0; }
-uint32_t peekZ(int, int) { return 0xFFFFFF; }  // far plane: nothing occludes (lens flares, sun)
+
+// GXPeekZ (the sun's occlusion test, sunmodel.cpp: a point is open sky when it reads the clear
+// value 0xFFFFFF), called on the game's side: from the newest complete depth snapshot (endFrame,
+// a frame or two late). EFB (x, y) is framebuffer column 239 - y/2, row 40 + x/2 (gx3ds.h, as
+// efbTexCoord); the D24S8 buffer is in 8x8 Morton tiles, 240 pixels to a row.
+uint32_t peekZ(int x, int y)
+{
+	const int idx = s_depthReady;
+	if (idx < 0 || !s_depthSnap[idx])
+		return 0xFFFFFF;
+	int fx = 239 - (y >> 1), fy = 40 + (x >> 1);
+	fx = fx < 0 ? 0 : fx > 239 ? 239 : fx;
+	fy = fy < 0 ? 0 : fy > 399 ? 399 : fy;
+	static const uint8_t kMorton[8][8] = {
+	    {0, 1, 4, 5, 16, 17, 20, 21},     {2, 3, 6, 7, 18, 19, 22, 23},     {8, 9, 12, 13, 24, 25, 28, 29},
+	    {10, 11, 14, 15, 26, 27, 30, 31}, {32, 33, 36, 37, 48, 49, 52, 53}, {34, 35, 38, 39, 50, 51, 54, 55},
+	    {40, 41, 44, 45, 56, 57, 60, 61}, {42, 43, 46, 47, 58, 59, 62, 63},
+	};
+	const uint32_t texel = (uint32_t)(((fy >> 3) * (kScreenH >> 3) + (fx >> 3)) << 6) + kMorton[fy & 7][fx & 7];
+	uint32_t* p = (uint32_t*)s_depthSnap[idx] + texel;
+	// the GPU wrote it: this core's cache may hold an older line
+	GSPGPU_InvalidateDataCache((void*)((uintptr_t)p & ~(uintptr_t)31), 32);
+	return *(volatile uint32_t*)p & 0xFFFFFF;
+}
 void pixMetricClear() {}
 uint32_t pixMetricRead() { return 0; }
 

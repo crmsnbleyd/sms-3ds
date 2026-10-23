@@ -15,6 +15,12 @@ volatile uint32_t sms3ds_gx_copies;
 volatile uint32_t sms3ds_gx_primitives;
 volatile uint32_t sms3ds_gx_vertices;
 volatile uint32_t sms3ds_hud_debug_shown;
+// debugging: azahar.py writes an EFB point to sms3ds_peek_probe[0..1] and sets [2]; the HUD thread
+// answers GXPeekZ's value there in [3] (and clears [2])
+volatile uint32_t sms3ds_peek_probe[4];
+namespace gx {
+uint32_t peekZ(int x, int y);  // gx3ds/render.cpp
+}
 extern "C" volatile Sms3dsHid sms3ds_remote_pad;  // hid_3ds.cpp: scripts/azahar.py's buttons
 
 namespace {
@@ -107,6 +113,10 @@ void hudThread(void*)
 		if (!aptMainLoop() || ((held & KEY_START) && (held & KEY_SELECT))) {
 			fflush(stderr);
 			svcExitProcess();
+		}
+		if (sms3ds_peek_probe[2]) {
+			sms3ds_peek_probe[3] = gx::peekZ((int)sms3ds_peek_probe[0], (int)sms3ds_peek_probe[1]);
+			sms3ds_peek_probe[2] = 0;
 		}
 		const uint32_t remote = sms3ds_remote_pad.keys;
 		const bool combo = (held & (KEY_L | KEY_R | KEY_X)) == (KEY_L | KEY_R | KEY_X) ||
