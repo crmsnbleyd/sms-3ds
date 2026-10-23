@@ -50,13 +50,14 @@ Your saves go to `/3ds/sms-3ds/card-a/` on the SD card.
 | ZL or ZR | Z |
 | START | START |
 | D-Pad | D-Pad |
+| L + R + X | Show or hide debug information on the lower screen |
+| START + SELECT | Quit |
 
 L and R are always pressed fully, so R sprays from a standing position. Walking while spraying (a half-pressed R
 on the GameCube) isn't possible yet.
 
 ## Known issues
 
-- The lower screen doesn't show anything right now.
 - Audio might sound crunchy.
 - Many cutscenes don't load.
 - The game runs at up to 30 fps and can slow down in busy scenes.

@@ -55,7 +55,7 @@ extern volatile uint32_t sms3ds_gx_batches_per_frame, sms3ds_gx_vertices_per_fra
 extern volatile float sms3ds_gx_cpu_ms, sms3ds_gx_gpu_ms;  // citro3d processing / drawing time
 extern volatile uint32_t sms3ds_gx_tev_approx;   // batches drawn with an approximation
 extern volatile uint32_t sms3ds_gx_approx_why;   // gx3ds.h AX_* bits seen in the last frame
-extern volatile uint32_t sms3ds_gx_dump_request; // set by the HUD (L+R+X): dump the next frame's GX state
+extern volatile uint32_t sms3ds_gx_dump_request; // set from outside (azahar.py): dump the next frame's GX state
 // gx3ds/render.cpp: where the last frame's time went (ms): the whole frame (display copy to display
 // copy), the backend's batch flushes (of which CPU transform and texture checks/conversion), waiting
 // for the GPU at frame start, and the GX front end's vertex decoding. The rest is game logic.

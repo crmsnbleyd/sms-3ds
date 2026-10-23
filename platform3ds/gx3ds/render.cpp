@@ -892,12 +892,12 @@ void calibrateCopies()
 	s_clearPending = true;
 }
 
-// --- frame dump (hold L+R+X): the GX state of each distinct batch of one frame -------------------------
+// --- frame dump: the GX state of each distinct batch of one frame -------------------------
 FILE* s_dump;
 std::unordered_set<uint64_t> s_dumpSeen;
 uint32_t s_dumpBatches;
 
-// A dump is taken 10 s (300 display frames) after entering each area, once per area, on L+R+X, or
+// A dump is taken 10 s (300 display frames) after entering each area, once per area, on sms3ds_gx_dump_request, or
 // when the file sdmc:/3ds/sms-3ds/dump exists (checked every second; removed when taken).
 bool dumpDue()
 {

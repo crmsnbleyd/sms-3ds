@@ -1,5 +1,5 @@
 // Status display on the bottom screen (the top screen belongs to the renderer): live counters and
-// the newest log lines. Runs on its own thread on the system core (core 1), so it keeps updating
+// the newest log lines, hidden until L+R+X is pressed (and again to hide it). Runs on its own thread on the system core (core 1), so it keeps updating
 // while the game's threads hold the application core.
 #include "sms3ds.h"
 
@@ -14,6 +14,7 @@ volatile uint32_t sms3ds_gx_frames;
 volatile uint32_t sms3ds_gx_copies;
 volatile uint32_t sms3ds_gx_primitives;
 volatile uint32_t sms3ds_gx_vertices;
+extern "C" volatile Sms3dsHid sms3ds_remote_pad;  // hid_3ds.cpp: scripts/azahar.py's buttons
 
 namespace {
 
@@ -91,25 +92,40 @@ void drawBottom()
 	    (double)sms3ds_prof_phase_ms[4]);
 	put("\x1b[15;1Hstate %d area %d ep %d file %d  pad %04x   ", sms3ds_state, sms3ds_area, sms3ds_episode,
 	    sms3ds_save_file, (unsigned)sms3ds_pad_buttons);
-	put("\x1b[17;1H\x1b[7m log  (START+SELECT quit, L+R+X dump)    \x1b[0m");
+	put("\x1b[17;1H\x1b[7m log  (START+SELECT quit, L+R+X hide)    \x1b[0m");
 }
 
 void hudThread(void*)
 {
-	for (;;) {
+	// Input is polled every 50 ms so a short L+R+X press is seen; the display redraws every 250 ms.
+	// Only held state is used (the game thread scans HID too, so "keys down" is unreliable here).
+	bool shown = false, comboWas = false;
+	for (unsigned tick = 0;; tick++) {
 		hidScanInput();
 		u32 held = hidKeysHeld();
 		if (!aptMainLoop() || ((held & KEY_START) && (held & KEY_SELECT))) {
 			fflush(stderr);
 			svcExitProcess();
 		}
-		if ((held & KEY_L) && (held & KEY_R) && (held & KEY_X) && !sms3ds_gx_dump_request)
-			sms3ds_gx_dump_request = 1;
-		drawBottom();
-		drawLog();
-		gfxFlushBuffers();
-		gfxScreenSwapBuffers(GFX_BOTTOM, false);
-		svcSleepThread(250 * 1000 * 1000LL);
+		const uint32_t remote = sms3ds_remote_pad.keys;
+		const bool combo = (held & (KEY_L | KEY_R | KEY_X)) == (KEY_L | KEY_R | KEY_X) ||
+		                   (remote & (SMS3DS_L | SMS3DS_R | SMS3DS_X)) == (SMS3DS_L | SMS3DS_R | SMS3DS_X);
+		const bool toggled = combo && !comboWas;
+		comboWas = combo;
+		if (toggled)
+			shown = !shown;
+		if (toggled || (shown && tick % 5 == 0)) {
+			consoleSelect(&s_bottom);
+			if (shown) {
+				drawBottom();
+				drawLog();
+			} else {
+				consoleClear();
+			}
+			gfxFlushBuffers();
+			gfxScreenSwapBuffers(GFX_BOTTOM, false);
+		}
+		svcSleepThread(50 * 1000 * 1000LL);
 	}
 }
 
