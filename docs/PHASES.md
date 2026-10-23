@@ -3,11 +3,11 @@
 | Phase | Goal | Status |
 | --- | --- | --- |
 | 0 | macOS toolchain (devkitPro), reference repos, PC baseline build, recon (`docs/PORT-MAP.md`) | done 2026-10-21 |
-| 1 | Headless boot: `sms_3ds.3dsx` runs the decomp + PC platform layer on 3DS with a null GX backend; the console shows the game advancing to a stage load | built 2026-10-21; awaiting first Azahar run |
-| 2 | Renderer: citro3d backend behind `gx_internal.h`'s seam (replaces `platform3ds/gx_null_backend.cpp`); TEV → PICA200 combiners; texture conversion with a hash-keyed 3DS texture pack from the browser converter, runtime fallback | 2a geometry ✓, 2b textures ✓ (title + file select recognisable), 2c TEV built; 2d (EFB copies) next |
-| 3 | Input (HID → PAD, C-stick on New 3DS) and audio (DSP mixer → ndsp; DSP-ADPCM is native) | — |
-| 4 | Performance: 804 MHz, second core, hot loops (skinning, matrix maths, FIFO parsing) | — |
-| 5 | Browser asset converter (reads the user's disc image locally, writes the 3DS texture pack) | — |
+| 1 | Headless boot: `sms_3ds.3dsx` runs the decomp + PC platform layer on 3DS with a null GX backend; the console shows the game advancing to a stage load | done 2026-10-21 |
+| 2 | Renderer: citro3d backend behind `gx_internal.h`'s seam (replaces `platform3ds/gx_null_backend.cpp`); TEV → PICA200 combiners; textures decoded at run time | done: geometry, textures, TEV, EFB copies and write-backs, scissor, depth peeks (sun), movies (YUV converted on the GX thread), the HUD on the bottom screen; open: depth copies (Bowser's bath), widescreen |
+| 3 | Input (HID → PAD, C-stick on New 3DS) and audio | done: pad and C-stick; voices on the 3DS DSP (ndsp, 23 channels + a CPU mix of the rest), per-sample volume ramps; open: echo/reverb (FX sends) |
+| 4 | Performance: 804 MHz, second core, hot loops | mostly done: GX thread on core 2, display-list cache, TEV plan cache, no per-frame GX wait; Delfino Plaza and the main levels at 30 fps; open: stage 23's grass (~22 fps) |
+| 5 | Browser asset converter (reads the user's disc image locally, writes a 3DS texture pack) | not needed so far: the game reads the disc image (ISO/CISO) directly and converts textures at run time |
 
 ## Phase 1 design (see the approved plan for details)
 
