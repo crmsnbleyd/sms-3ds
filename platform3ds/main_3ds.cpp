@@ -63,8 +63,11 @@ int main(int argc, char** argv)
 		        (unsigned long)(90000000ull * (u64)SYSCLOCK_ARM11 / (dt ? dt : 1) / 1000000ull));
 	}
 
-	// Phase 1: no picture, sound or input yet; skip what would only wait on them.
+	// No sound output yet (Phase 3: the 3DS DSP through ndsp). SMS_NO_AUDIO=0 runs the game's audio with
+	// the software mixer, paced by ai.cpp's clock thread (SMS_AUDIO=0: no device): at the plaza start that
+	// mixing costs 8 ms a frame (17 ms while spraying), the game's own audio code about 1.5 ms.
 	setDefault("SMS_NO_AUDIO", "1");
+	setDefault("SMS_AUDIO", "0");
 	setDefault("SMS_SKIP_MOVIES", "1");
 	setDefault("SMS_SKIP_INTRO", "1");
 	// The game's own 30 fps logic (sms-pc-port defaults to 60, twice the work per second).

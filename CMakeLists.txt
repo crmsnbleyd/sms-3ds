@@ -208,6 +208,7 @@ sms_port_sources(SMS_PLATFORM_SOURCES
   platform/disc/gcdisc.cpp
   platform/ar/ar.cpp
   platform/card/card.cpp
+  platform/audio/ai.cpp
   platform/audio/noaudio.cpp
   platform/audio/dsp_hle.cpp
   platform/audio/dsp_mixer.cpp
