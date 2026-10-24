@@ -53,13 +53,14 @@ Your saves go to `/3ds/sms-3ds/card-a/` on the SD card.
 | D-Pad | D-Pad |
 | L + R + X | Swap the lower screen between the HUD and debug information |
 | START + SELECT | Quit |
+| Touch screen | Tap Skip to skip a movie; tap YES / NO (or another choice) to answer a question |
 
 R is a full press, as when the GameCube's R clicks: Mario stands still to spray. ZR presses R part of the way, so
 he sprays while he walks.
 
 ## Known issues
 
-- Audio might sound crunchy.
+- Echo and reverb effects (in caves, for example) aren't played.
 - The game runs at up to 30 fps and can slow down in busy scenes.
 - The picture keeps the GameCube's 4:3 shape, with black bars at the sides of the top screen. Widescreen isn't
   implemented yet.
