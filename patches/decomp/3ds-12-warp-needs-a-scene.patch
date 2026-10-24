@@ -1,0 +1,53 @@
+--- a/src/GC2D/CardLoad.cpp
++++ b/src/GC2D/CardLoad.cpp
+@@ -2329,7 +2329,35 @@
+ 		unkB0 = param_1;
+ 		setupScoreScreen();
+ 	}
++}
++#ifdef __3DS__
++#include <System/ScenarioArchiveName.hpp>
++// Whether the scene an area loads is on the disc (as the warp menu's ApplicationWarpScene checks).
++// The stage table's areas 10-12 name developer scenes retail never loads (none, scale1, scale2,
++// test12): a warp there crashed in TGuide::load once the scene failed to load.
++static bool sms3dsWarpSceneExists(int stage, int scenario)
++{
++	TNameRefPtrAryT<TNameRefAryT<TScenarioArchiveName> >* stages = gpApplication.unk30;
++	if (!stages || stage >= (int)stages->getChildren().size())
++		return false;
++	TNameRefAryT<TScenarioArchiveName>* episodes = stages->getChildren()[stage];
++	if (!episodes || scenario < 0 || scenario >= (int)episodes->size())
++		return false;
++	const char* arc = episodes->getChildren()[scenario].mArcName;
++	if (!arc || !*arc)
++		return false;
++	char path[128];
++	snprintf(path, sizeof path, "/data/scene/%s", arc);
++	if (DVDConvertPathToEntrynum(path) >= 0)
++		return true;
++	char* ext = strstr(path, ".arc");
++	if (!ext)
++		return false;
++	strcpy(ext, ".szs");
++	return DVDConvertPathToEntrynum(path) >= 0;
+ }
++#endif
++
+ #ifdef TARGET_PC
+ // port: SMS_WARP=stage,scenario[,shines] sends a file-select load to another
+ // area (debugging; 1,0,1 is Delfino Plaza as it is after the airstrip).
+@@ -2350,6 +2378,14 @@
+ 	if (done || !warp || sscanf(warp, "%d,%d,%d", &stage, &scenario, &shines) < 1
+ 	    || stage < 0)
+ 		return;
++#ifdef __3DS__
++	if (!sms3dsWarpSceneExists(stage, scenario)) {
++		done = true;
++		OSReport("SMS_WARP: stage %d scenario %d has no scene on the disc: not warping\n", stage,
++		         scenario);
++		return;
++	}
++#endif
+ 	if (shines >= 0)
+ 		TFlagManager::getInstance()->setFlag(0x40000, shines);
+ 	// setNextStage has already run and latched its flags: replace its area.
