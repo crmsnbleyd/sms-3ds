@@ -1,6 +1,6 @@
 --- a/src/GC2D/CardSave.cpp
 +++ b/src/GC2D/CardSave.cpp
-@@ -26,7 +26,49 @@
+@@ -26,6 +26,58 @@
  #include <MSound/MSoundBGM.hpp>
  #ifdef TARGET_PC
  #include <sms_modhook.h>
@@ -34,6 +34,16 @@
 +	return best;
 +}
 +
++// The selected choice's sparkle, in the emitter group drawn on the bottom screen with the HUD
++// (EmitterViewObj.cpp, GCConsole2.cpp kHudEmitterGroup), as JPAEmitterManager::createEmitter does.
++static void sms3dsCreateHudEmitter(JPAEmitterManager* manager, const JGeometry::TVec3<f32>& pos, s32 id)
++{
++	if (JPABaseEmitter* emitter = manager->createSimpleEmitterID(pos, id, 1, 0, nullptr, nullptr)) {
++		manager->unkC4       = 1;
++		manager->unkC8[0][0] = emitter;
++	}
++}
++
 +// After a choice prompt reads its input: a tapped choice, selected and confirmed (A).
 +#define SMS3DS_TAP_CHOICE(input, ...)                                          \
 +	do {                                                                       \
@@ -45,12 +55,11 @@
 +			input  = 0x20;                                                     \
 +		}                                                                      \
 +	} while (0)
- #endif
 +#endif
+ #endif
  
  extern JPAEmitterManager* gpEmitterManager4D2;
- 
-@@ -653,6 +695,9 @@
+@@ -653,6 +705,9 @@
  	case 2: {
  		s8 old    = getUnk2E9();
  		u32 input = unk270->mEnabledFrameMeaning;
@@ -60,7 +69,19 @@
  
  		if (input & 0x20) {
  			if (unk44 != nullptr)
-@@ -904,6 +949,9 @@
+@@ -715,7 +770,11 @@
+ 				JGeometry::TVec3<f32> pos(bounds.x1 + bounds.getWidth() * 0.5f,
+ 				                          bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+ 				JPAEmitterManager* manager = gpEmitterManager4D2;
++#ifdef __3DS__
++				sms3dsCreateHudEmitter(manager, pos, 0x1FA);
++#else
+ 				manager->createEmitter(pos, 0x1FA, nullptr, nullptr);
++#endif
+ 
+ 				unk44 = gpEmitterManager4D2->unkC8[0][0];
+ 				unk44->setRotation(0, 0, DEG2SHORTANGLE(12));
+@@ -904,6 +963,9 @@
  	case 2: {
  		s8 old    = getUnk2E9();
  		u32 input = unk270->mEnabledFrameMeaning;
@@ -70,7 +91,19 @@
  
  		if (input & 0x20) {
  			if (unk44 != nullptr)
-@@ -1231,6 +1279,9 @@
+@@ -953,7 +1015,11 @@
+ 				JGeometry::TVec3<f32> pos(bounds.x1 + bounds.getWidth() * 0.5f,
+ 				                          bounds.y1 + bounds.getHeight() * 0.5f, 0.0f);
+ 				JPAEmitterManager* manager = gpEmitterManager4D2;
++#ifdef __3DS__
++				sms3dsCreateHudEmitter(manager, pos, 0x1FA);
++#else
+ 				manager->createEmitter(pos, 0x1FA, nullptr, nullptr);
++#endif
+ 
+ 				unk44 = gpEmitterManager4D2->unkC8[0][0];
+ 				unk44->setRotation(0, 0, DEG2SHORTANGLE(12));
+@@ -1231,6 +1297,9 @@
  	case 2: {
  		s8 oldSelect = getUnk2E9();
  		u32 input    = unk270->mEnabledFrameMeaning;
@@ -80,7 +113,7 @@
  
  		if (input & 0x20) {
  			gpMSound->startSoundSystemSE(0x481CU, 0, nullptr, 0);
-@@ -1345,6 +1396,9 @@
+@@ -1345,6 +1414,9 @@
  	case 2: {
  		s8 oldSelect = getUnk2E9();
  		u32 input    = unk270->mEnabledFrameMeaning;
@@ -90,7 +123,7 @@
  
  		if (input & 0x20) {
  			gpMSound->startSoundSystemSE(0x481CU, 0, nullptr, 0);
-@@ -1513,6 +1567,9 @@
+@@ -1513,6 +1585,9 @@
  	case 2: {
  		s8 oldSelect = getUnk2E9();
  		u32 input    = unk270->mEnabledFrameMeaning;
@@ -100,7 +133,7 @@
  
  		if (input & 0x20) {
  			gpMSound->startSoundSystemSE(0x481CU, 0, nullptr, 0);
-@@ -2316,11 +2373,18 @@
+@@ -2316,11 +2391,18 @@
  void TCardSave::execIssueGX_(JDrama::TGraphics* param_1)
  {
  	const JDrama::TRect& scissorRect = param_1->getScissor();
