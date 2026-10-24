@@ -12,6 +12,7 @@
 #                                                 (3DS units, rim ~156) for SECONDS (default 0.2);
 #                                                 CX CY after the stick: the C-stick (camera)
 #   uv run scripts/azahar.py wait-area AREA [TIMEOUT]   until the game is in that area (state 5)
+#   uv run scripts/azahar.py touch X Y [SECONDS]  touch the bottom screen at pixel (X, Y)
 #   uv run scripts/azahar.py plaza [AREA]         from the title screen to Delfino Plaza (file A), or to
 #                                                 AREA when settings.txt on the SD card sets SMS_WARP
 #   uv run scripts/azahar.py log [N]              the last N lines of the game's log.txt
@@ -156,6 +157,15 @@ def cmd_shot(name=None):
     with open(path, "wb") as fh:
         fh.write(png)
     print(path)
+
+
+def cmd_touch(x, y, seconds="0.2"):
+    # a touch on the bottom screen at pixel (x, y) for `seconds` (hid_3ds.cpp sms3ds_remote_touch)
+    c = rpc()
+    addr = sym("sms3ds_remote_touch")
+    c.write_memory(addr, struct.pack("<iii", int(x), int(y), 1))
+    time.sleep(float(seconds))
+    c.write_memory(addr, struct.pack("<iii", 0, 0, 0))
 
 
 def cmd_pad(keys, seconds="0.2", sx="0", sy="0", cx="0", cy="0"):

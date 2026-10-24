@@ -1,0 +1,104 @@
+--- a/src/System/MovieDirector.cpp
++++ b/src/System/MovieDirector.cpp
+@@ -212,6 +212,26 @@
+ // (standard_fontEx.bfn), drawn green like the button.
+ void SMSDrawSkipPrompt(JDrama::TGraphics* graphics, int width, int height);
+ 
++#ifdef __3DS__
++// The 3DS draws the prompt on the bottom screen (drawn as HUD: platform3ds/gx3ds/render.cpp shows
++// EFB x 0-640, y 0-448 there at half size, 8 rows down) as a large button, and a tap on it skips
++// the movie as A does (direct).
++extern "C" void GXPC_SetHud(int on);
++extern "C" int sms3ds_touch_tap(int* x, int* y);
++static JUTRect sms3dsSkipBox;  // the button, in EFB pixels
++static bool sms3dsMoviePrompt;  // SMSDrawSkipPrompt is drawing a movie's (not the logos') prompt
++
++static bool sms3dsSkipTapped()
++{
++	int x, y;
++	if (!sms3ds_touch_tap(&x, &y))
++		return false;
++	const int ex = x * 2, ey = y * 2 - 16, slack = 16;
++	return ex >= sms3dsSkipBox.x1 - slack && ex <= sms3dsSkipBox.x2 + slack && ey >= sms3dsSkipBox.y1 - slack
++	       && ey <= sms3dsSkipBox.y2 + slack;
++}
++#endif
++
+ class TMovieSkipPrompt : public JDrama::TViewObj {
+ public:
+ 	TMovieSkipPrompt(const TMovieDirector* director)
+@@ -234,9 +254,17 @@
+ 
+ void TMovieSkipPrompt::perform(u32 cue, JDrama::TGraphics* graphics)
+ {
++#ifdef __3DS__
++	if ((cue & CUE_DRAW) && shown(mDirector)) {
++		sms3dsMoviePrompt = true;
++		SMSDrawSkipPrompt(graphics, SMSGetGameRenderWidth(), SMSGetGameRenderHeight());
++		sms3dsMoviePrompt = false;
++	}
++#else
+ 	if ((cue & CUE_DRAW) && shown(mDirector))
+ 		SMSDrawSkipPrompt(graphics, SMSGetGameRenderWidth(),
+ 		                  SMSGetGameRenderHeight());
++#endif
+ }
+ 
+ // The prompt in a width x height frame; the Nintendo and Dolby logos show it
+@@ -244,7 +272,46 @@
+ void SMSDrawSkipPrompt(JDrama::TGraphics* graphics, int width, int height)
+ {
+ 	if (!gpSystemFont)
++		return;
++#ifdef __3DS__
++	if (sms3dsMoviePrompt) {
++		GXPC_SetHud(1);
++		J2DOrthoGraph graph(graphics->getViewport());
++		graph.setup2D();
++		const int size = 64, padX = 36, padY = 22;
++		const JUtility::TColor green(60, 200, 70, 255), white(255, 255, 255, 255);
++		J2DPrint buttonText(gpSystemFont, 0, -0x80000000, green, green);
++		J2DPrint labelText(gpSystemFont, 0, -0x80000000, white, white);
++		buttonText.setFontSize(size, size);
++		labelText.setFontSize(size, size);
++		// getWidth measures at the font's own size; print returns the width it drew, which sizes
++		// the button from the next frame on
++		static f32 drawnButtonW, drawnLabelW;
++		if (drawnButtonW <= 0.0f) {
++			const f32 k = (f32)size / (f32)gpSystemFont->getHeight();
++			drawnButtonW = buttonText.getWidth("@") * k;
++			drawnLabelW  = labelText.getWidth(" Skip") * k;
++		}
++		const int w = (int)(drawnButtonW + drawnLabelW) + 2 * padX, h = size + 2 * padY;
++		const int x0 = 320 - w / 2, y0 = 224 - h / 2;
++		sms3dsSkipBox = JUTRect(x0, y0, x0 + w, y0 + h);
++		graph.setup2D();  // the prints above set the font's texture stage up: untextured boxes again
++		GXSetCullMode(GX_CULL_NONE);  // fillBox leaves it as the last draw set it
++		graph.setColor(JUtility::TColor(255, 255, 255, 200));  // a light rim
++		graph.fillBox(JUTRect(x0 - 4, y0 - 4, x0 + w + 4, y0 + h + 4));
++		graph.setColor(JUtility::TColor(10, 30, 70, 235));
++		graph.fillBox(sms3dsSkipBox);
++		// the boxes' 2D setup replaced the font's vertex format (J2DPrint sets it when made, and
++		// print does not): set it again, or the glyphs' vertices are read in the wrong format
++		const int baseline = y0 + padY + size;  // print's y is the baseline
++		buttonText.initiate();
++		drawnButtonW = buttonText.print(x0 + padX, baseline, "@");
++		labelText.initiate();
++		drawnLabelW = labelText.print(x0 + padX + (int)drawnButtonW, baseline, " Skip");
++		GXPC_SetHud(0);
+ 		return;
++	}
++#endif
+ 
+ 	J2DOrthoGraph graph(graphics->getViewport());
+ 	graph.setup2D();
+@@ -638,6 +705,9 @@
+ 	bool skipped = false;
+ 	if (TMovieSkipPrompt::shown(this)
+ 	    && (getGamePad()->checkFrameMeaning(0x20)
++#ifdef __3DS__
++	        || sms3dsSkipTapped()
++#endif
+ 	        || (port_skip_intro && gpApplication.getMovie() == 9))) {
+ 		skipped = true;
+ 		THPPlayerStop();

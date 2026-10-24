@@ -46,3 +46,30 @@ extern "C" void sms3ds_hid_read(Sms3dsHid* out)
 		out->cstickY = r.cstickY;
 	}
 }
+
+// A new touch on the bottom screen (it was not touched at the last call), in its pixels (0-319,
+// 0-239): the movie skip button (patches/decomp/3ds-13). sms3ds_remote_touch (x, y, down) is a touch
+// written from outside (scripts/azahar.py touch), as the remote pad is.
+extern "C" volatile int32_t sms3ds_remote_touch[3];
+volatile int32_t sms3ds_remote_touch[3];
+
+extern "C" int sms3ds_touch_tap(int* x, int* y)
+{
+	static bool was;
+	touchPosition t = {};
+	bool down = (hidKeysHeld() & KEY_TOUCH) != 0;
+	if (down)
+		hidTouchRead(&t);
+	if (sms3ds_remote_touch[2]) {
+		down = true;
+		t.px = (u16)sms3ds_remote_touch[0];
+		t.py = (u16)sms3ds_remote_touch[1];
+	}
+	const bool tap = down && !was;
+	was = down;
+	if (tap) {
+		*x = t.px;
+		*y = t.py;
+	}
+	return tap;
+}
