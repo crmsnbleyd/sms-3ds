@@ -24,7 +24,8 @@ extern "C" void sms3ds_hid_read(Sms3dsHid* out)
 	if (k & KEY_Y) out->keys |= SMS3DS_Y;
 	if (k & KEY_L) out->keys |= SMS3DS_L;
 	if (k & KEY_R) out->keys |= SMS3DS_R;
-	if (k & (KEY_ZL | KEY_ZR)) out->keys |= SMS3DS_Z;
+	if (k & KEY_ZL) out->keys |= SMS3DS_Z;
+	if (k & KEY_ZR) out->keys |= SMS3DS_RSOFT;
 	if (k & KEY_START) out->keys |= SMS3DS_START;
 	if (k & KEY_DUP) out->keys |= SMS3DS_UP;
 	if (k & KEY_DDOWN) out->keys |= SMS3DS_DOWN;

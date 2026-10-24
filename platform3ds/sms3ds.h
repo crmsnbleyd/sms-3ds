@@ -32,6 +32,7 @@ enum {
 	SMS3DS_A = 1 << 0, SMS3DS_B = 1 << 1, SMS3DS_X = 1 << 2, SMS3DS_Y = 1 << 3,
 	SMS3DS_L = 1 << 4, SMS3DS_R = 1 << 5, SMS3DS_Z = 1 << 6, SMS3DS_START = 1 << 7,
 	SMS3DS_UP = 1 << 8, SMS3DS_DOWN = 1 << 9, SMS3DS_LEFT = 1 << 10, SMS3DS_RIGHT = 1 << 11,
+	SMS3DS_RSOFT = 1 << 12,  // R part of the way (ZR): spraying while walking
 };
 typedef struct {
 	uint32_t keys;  // SMS3DS_* bits

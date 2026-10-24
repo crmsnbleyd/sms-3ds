@@ -47,14 +47,15 @@ Your saves go to `/3ds/sms-3ds/card-a/` on the SD card.
 | C-Stick | C-Stick (camera) |
 | A / B / X / Y | A / B / X / Y |
 | L / R | L / R |
-| ZL or ZR | Z |
+| ZL | Z |
+| ZR | R pressed part of the way: spray while walking |
 | START | START |
 | D-Pad | D-Pad |
 | L + R + X | Swap the lower screen between the HUD and debug information |
 | START + SELECT | Quit |
 
-L and R are always pressed fully, so R sprays from a standing position. Walking while spraying (a half-pressed R
-on the GameCube) isn't possible yet.
+R is a full press, as when the GameCube's R clicks: Mario stands still to spray. ZR presses R part of the way, so
+he sprays while he walks.
 
 ## Known issues
 

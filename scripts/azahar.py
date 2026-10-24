@@ -7,7 +7,7 @@
 #   uv run scripts/azahar.py hud                  the bottom screen's counters, read from memory
 #   uv run scripts/azahar.py shot [name]          screenshot of both screens -> local/shots/<name>.png
 #   uv run scripts/azahar.py pad KEYS [SECONDS] [STICKX STICKY [CX CY]]
-#                                                 hold buttons (A,B,X,Y,L,R,Z,START,UP,DOWN,LEFT,RIGHT,
+#                                                 hold buttons (A,B,X,Y,L,R,Z,ZR,START,UP,DOWN,LEFT,RIGHT,
 #                                                 joined with +; "-" for none) and the circle pad
 #                                                 (3DS units, rim ~156) for SECONDS (default 0.2);
 #                                                 CX CY after the stick: the C-stick (camera)
@@ -35,7 +35,7 @@ SDMC = os.path.expanduser("~/Library/Application Support/Azahar/sdmc/3ds/sms-3ds
 NM = "/opt/devkitpro/devkitARM/bin/arm-none-eabi-nm"
 
 KEYS = {"A": 1 << 0, "B": 1 << 1, "X": 1 << 2, "Y": 1 << 3, "L": 1 << 4, "R": 1 << 5, "Z": 1 << 6,
-        "START": 1 << 7, "UP": 1 << 8, "DOWN": 1 << 9, "LEFT": 1 << 10, "RIGHT": 1 << 11}
+        "START": 1 << 7, "UP": 1 << 8, "DOWN": 1 << 9, "LEFT": 1 << 10, "RIGHT": 1 << 11, "ZR": 1 << 12}
 
 
 def rpc():

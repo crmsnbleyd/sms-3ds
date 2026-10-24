@@ -65,6 +65,10 @@ extern "C" u32 PADRead(PADStatus* status)
 	if (h.keys & SMS3DS_R) {
 		b |= PAD_TRIGGER_R;
 		s.triggerRight = 255;
+	} else if (h.keys & SMS3DS_RSOFT) {
+		// ZR: R part of the way, analog only, as sms-pc-port's R_SOFT (40%): FLUDD sprays while
+		// Mario walks, where the full press (the click) stands him still
+		s.triggerRight = 102;
 	}
 	s.button = b;
 	sms3ds_pad_reads = sms3ds_pad_reads + 1;
