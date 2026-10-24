@@ -15,3 +15,11 @@ scripts/build-3ds.sh
 The result is `build-3ds/sms_3ds.3dsx`, a debug build: it includes developer tools such as GX frame dumps,
 which write to the SD card. For a release build without them, run `scripts/build-3ds.sh --release`; the
 result is `build-3ds-release/sms_3ds.3dsx`. Both are built with the same optimisation.
+
+## Checking the audio
+
+A debug build meters what the 3DS DSP is given: `uv run scripts/azahar.py audio [SECONDS]` prints, once a
+second, the loudest output sample (above 0 dBFS the DSP saturates it), and counts of samples past full scale,
+voice buffers that found their channel already played out (gaps), and 3 dB steps that hit queued audio. With
+`SMS_AUDIO_DUMP=sdmc:/3ds/sms-3ds/mix.wav` in the SD card's `settings.txt` it also writes that mix (float,
+before saturation) to the SD card; `uv run scripts/audio-levels.py` summarises the file.

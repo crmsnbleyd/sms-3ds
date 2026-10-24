@@ -16,6 +16,7 @@
 #   uv run scripts/azahar.py plaza [AREA]         from the title screen to Delfino Plaza (file A), or to
 #                                                 AREA when settings.txt on the SD card sets SMS_WARP
 #   uv run scripts/azahar.py log [N]              the last N lines of the game's log.txt
+#   uv run scripts/azahar.py audio [SECONDS]      the audio level meter once a second (debug builds)
 #
 # Uses the AzaharRPC.py that ships with Azahar (AZAHAR_SCRIPTING, default ~/Downloads/azahar/scripting)
 # and the symbols of build-3ds/sms_3ds.elf (SMS3DS_ELF: another build's, when launching that one). Screenshots go to the gitignored local/shots/.
@@ -137,6 +138,8 @@ def cmd_hud():
         ("tev compiles / xf-only set-ups", "%d / %d" % read(c, "sms3ds_gx_count", "10I")[8:]),
         ("audio: voices / channels / bufs / overruns / no-chan / ndsp frames / dropped / soft-mixed",
          " / ".join(str(x) for x in read(c, "sms3ds_audio_stats", "8I"))),
+        ("audio meter: peak 1 s / all / clipped samples / subframes / starved / jumps",
+         " / ".join(str(x) for x in read(c, "sms3ds_audio_meter", "6I"))),
         ("gx waits us: queue / fence / boundary; fences", "%d / %d / %d; %d" % read(c, "sms3ds_gx_waits", "4I")),
         ("game HUD: batches / verts / us", "%d / %d / %d" % read(c, "sms3ds_gx_hud", "3I")),
         ("approx why", "%05x" % u("sms3ds_gx_approx_why")),
@@ -242,6 +245,24 @@ def cmd_plaza(area="1"):
         time.sleep(1.5)
         cmd_pad("A")
     print("in the plaza" if area == "1" else "in area " + area)
+
+
+def cmd_audio(seconds="10"):
+    """The level meter once a second: the loudest output sample (dBFS; above 0 the DSP saturates it),
+    and what happened in that second: samples past full scale, voice buffers that found their channel
+    played out (gaps), volume steps of 3 dB or more on queued audio."""
+    c = rpc()
+    prev = read(c, "sms3ds_audio_meter", "8I")
+    print("%4s %8s %8s %8s %8s" % ("s", "peak dB", "clipped", "starved", "jumps"))
+    for t in range(int(seconds)):
+        time.sleep(1.0)
+        m = read(c, "sms3ds_audio_meter", "8I")
+        if m[6] == prev[6]:
+            print("%4d   (no audio rendered)" % (t + 1))
+            continue
+        db = 20 * __import__("math").log10(max(m[0], 1) / 32767.0)
+        print("%4d %8.1f %8d %8d %8d" % (t + 1, db, m[2] - prev[2], m[4] - prev[4], m[5] - prev[5]))
+        prev = m
 
 
 def cmd_log(n="30"):

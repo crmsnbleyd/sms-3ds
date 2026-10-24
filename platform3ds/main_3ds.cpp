@@ -74,8 +74,8 @@ int main(int argc, char** argv)
 	setDefault("SMS_NO_AUDIO", sound ? "0" : "1");
 	setDefault("SMS_AUDIO", "0");
 	setDefault("SMS_SKIP_MOVIES", "0");
-	// The logos and the opening movie play; A (or a tap on the bottom screen's Skip button) skips them.
-	setDefault("SMS_SKIP_INTRO", "0");
+	// The logos and the opening movie play (SMS_SKIP_INTRO is left unset, so settings.txt can set it);
+	// A, or a tap on the bottom screen's Skip button, skips them.
 	// The game's own 30 fps logic (sms-pc-port defaults to 60, twice the work per second).
 	setDefault("SMS_FRAME_RATE", "30");
 	setDefault("SMS_SAVE_DIR", SMS3DS_DIR "/card-a");
