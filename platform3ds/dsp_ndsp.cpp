@@ -350,6 +350,8 @@ void decode_adpcm_run(Decoder& d, const Voice& v, uint32_t count)
 }
 
 float s_preroll = kPrerollSeconds;  // SMS_AUDIO_PREROLL_MS (debug builds)
+bool s_allSoft;  // SMS_AUDIO_SOFTMIX=1 (debug builds): every voice in the software mix, to tell by ear
+                 // whether a fault is in the DSP's playback of the channels
 
 // cos and sin of the auto mixer's pan (0..127 -> 0..pi/2)
 float s_panCos[128], s_panSin[128];
@@ -645,7 +647,7 @@ void submit(int vi, const Voice& v)
 	}
 	d.prevGain = endGain;
 	if (d.chan < 0) {
-		d.chan = takeChan(vi, peak);
+		d.chan = s_allSoft ? -1 : takeChan(vi, peak);
 		d.contSub = 0;  // its audio so far was elsewhere
 		if (d.chan < 0) {
 			g.unassigned++;
@@ -922,6 +924,7 @@ extern "C" void port_dspmix_setup(uint32_t nvoices, void* voices, const uint32_t
 #if SMS3DS_DEBUG
 	if ((e = getenv("SMS_AUDIO_PREROLL_MS")) && *e)
 		s_preroll = (float)atoi(e) / 1000.0f;
+	s_allSoft = (e = getenv("SMS_AUDIO_SOFTMIX")) && *e && strcmp(e, "0") != 0;
 	// SMS_AUDIO_DUMP=path: the meter's mix as a WAV (float, before saturation), for scripts/audio-levels.py
 	const char* dump = getenv("SMS_AUDIO_DUMP");
 	if (dump && *dump && !g.dump) {
