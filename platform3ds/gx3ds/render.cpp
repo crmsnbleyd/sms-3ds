@@ -168,6 +168,7 @@ void beginFrame()
 	s_vertUsed = s_idxUsed = 0;
 	if (s_bottomOut)  // the HUD's backdrop
 		drawBottomBackground();
+	releaseIdleMovieTexture();
 	C3D_FrameDrawOn(drawTarget());
 	if (s_arenaFull) {
 		s_arenaGen++;

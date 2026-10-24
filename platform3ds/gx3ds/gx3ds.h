@@ -92,6 +92,7 @@ uint32_t gxTexBytes(uint32_t fmt, uint32_t w, uint32_t h);  // bytes of one GX t
 C3D_Tex* yuvTexture(const uint8_t* y, const uint8_t* u, const uint8_t* v, uint32_t w, uint32_t h);
 // texture.cpp: the bottom screen's background behind the HUD (generated, made once), or null.
 C3D_Tex* bottomBackgroundTexture();
+void releaseIdleMovieTexture();  // the movie frames' texture, once no movie has been drawn for a while
 
 // render.cpp: the texture an EFB copy (GXCopyTex) last drew for destination `ptr`, or null.
 C3D_Tex* copyTexture(const void* ptr);

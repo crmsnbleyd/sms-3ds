@@ -444,9 +444,20 @@ void noteWhite(const char* why, const void* ptr, uint32_t fmt, uint32_t w, uint3
 	static int logged;
 	if (logged < 12) {
 		logged++;
-		fprintf(stderr, "[gx3ds] texture %p fmt %lu %lux%lu drawn white: %s (linear free %lu KiB)\n", ptr,
-		        (unsigned long)fmt, (unsigned long)w, (unsigned long)h, why,
-		        (unsigned long)(linearSpaceFree() >> 10));
+		// the largest block that can be had (linear memory can be free in pieces too small)
+		size_t lo = 0, hi = linearSpaceFree();
+		while (hi - lo > 4096) {
+			const size_t mid = (lo + hi) / 2;
+			if (void* p = linearMemAlign(mid, 0x80)) {
+				linearFree(p);
+				lo = mid;
+			} else {
+				hi = mid;
+			}
+		}
+		fprintf(stderr, "[gx3ds] texture %p fmt %lu %lux%lu drawn white: %s (linear free %lu KiB, largest %lu KiB, VRAM free %lu KiB)\n",
+		        ptr, (unsigned long)fmt, (unsigned long)w, (unsigned long)h, why,
+		        (unsigned long)(linearSpaceFree() >> 10), (unsigned long)(lo >> 10), (unsigned long)(vramSpaceFree() >> 10));
 	}
 }
 
@@ -545,10 +556,25 @@ C3D_Tex* bottomBackgroundTexture()
 // and unclamped intermediate values (THPDraw.c THPGXYuv2RgbSetup), which the PICA's clamped
 // combiners cannot reproduce (the picture came out magenta). The frame is converted here instead,
 // with the JPEG (full-range BT.601) matrix the TEV constants approximate.
+namespace {
+C3D_Tex s_movieTex;  // 1 MiB of linear memory for a 640x448 movie: freed once no movie is drawn
+bool s_movieOk;
+uint32_t s_movieUsed;
+}  // namespace
+
+void releaseIdleMovieTexture()
+{
+	if (s_movieOk && g_displayFrames - s_movieUsed > 30) {  // half a second: the GPU is done with it
+		C3D_TexDelete(&s_movieTex);
+		s_movieOk = false;
+	}
+}
+
 C3D_Tex* yuvTexture(const uint8_t* yp, const uint8_t* up, const uint8_t* vp, uint32_t w, uint32_t h)
 {
-	static C3D_Tex tex;
-	static bool texOk, tables;
+	C3D_Tex& tex = s_movieTex;
+	bool& texOk = s_movieOk;
+	static bool tables;
 	static int16_t rV[256], gU[256], gV[256], bU[256];
 	if (!tables) {
 		for (int i = 0; i < 256; i++) {
@@ -565,6 +591,7 @@ C3D_Tex* yuvTexture(const uint8_t* yp, const uint8_t* up, const uint8_t* vp, uin
 	const uint32_t pw = pot(w), ph = pot(h);
 	if (w > pw || h > ph)
 		return nullptr;
+	s_movieUsed = g_displayFrames;
 	if (!texOk || tex.width != pw || tex.height != ph) {
 		if (texOk)
 			C3D_TexDelete(&tex);
