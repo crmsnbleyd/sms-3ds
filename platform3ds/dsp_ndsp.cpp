@@ -5,7 +5,8 @@
 // 80-sample subframe at a time. Mixing them on the ARM11 cost 8-17 ms a frame in Delfino Plaza. Here
 // the CPU only decodes what each voice consumes in the subframe (its AFC ADPCM, PCM or stream ring, at
 // the source rate) and queues it on an ndsp channel playing at the voice's pitch; the DSP resamples,
-// applies volume and pan, and mixes. Sunshine's AFC ADPCM is not the DSP-ADPCM the 3DS decodes (9-byte
+// applies volume and pan, and mixes. By default (s_allSoft) the CPU resamples and mixes them instead,
+// into one stereo stream on one channel: the DSP's own mixing crinkled. Sunshine's AFC ADPCM is not the DSP-ADPCM the 3DS decodes (9-byte
 // frames of 16 samples, a shared 16-entry predictor table), so the wave data stays in ARAM as it is.
 //
 // Voice semantics (start, pause, loops with the stored ADPCM history, stop requests halving the
@@ -363,8 +364,11 @@ void decode_adpcm_run(Decoder& d, const Voice& v, uint32_t count)
 }
 
 float s_preroll = kPrerollSeconds;  // SMS_AUDIO_PREROLL_MS (debug builds)
-bool s_allSoft;  // SMS_AUDIO_SOFTMIX=1 (debug builds): every voice in the software mix, to tell by ear
-                 // whether a fault is in the DSP's playback of the channels
+// Every voice in the software mix, one stereo stream for the DSP to play. Played on the DSP's own
+// channels (SMS_AUDIO_SOFTMIX=0) the voices crinkled where the same samples mixed here did not (by
+// ear, 2026-10-24; still after the per-buffer rates of onDspFrame). In Delfino Plaza the mix costs
+// 15-20 ms of CPU a second more than the channels (Azahar), and the frame rate is unchanged.
+bool s_allSoft = true;
 
 // cos and sin of the auto mixer's pan (0..127 -> 0..pi/2)
 float s_panCos[128], s_panSin[128];
@@ -556,17 +560,23 @@ void accumulate(int32_t (*acc)[2 * kSubMax], bool* used, const Decoder& d, uint3
 	const uint32_t first = d.lastSub + 1 - subs;
 	if (first < g.mixNext || !n)
 		return;  // already submitted (cannot happen: buffers reach back kSubPerBuf at most)
-	const float gl = kGainScale * d.pan, gr = kGainScale * (1.0f - d.pan);
-	const uint64_t step = ((uint64_t)n << 16) / outN;
-	uint64_t p = 0;
-	for (uint32_t k = 0; k < outN; k++, p += step) {
-		const uint32_t i = (uint32_t)(p >> 16), fr = (uint32_t)(p & 0xFFFF);
-		const int32_t s0 = d.stage[i], s1 = d.stage[i + 1 < n ? i + 1 : i];
-		const float smp = (float)(s0 + (((s1 - s0) * (int32_t)fr) >> 16));
-		const uint32_t sub = first + k / sn, slot = sub % kMixSubs, off = k % sn;
-		acc[slot][2 * off] += (int32_t)(smp * gl);
-		acc[slot][2 * off + 1] += (int32_t)(smp * gr);
+	// gains in Q14 (kGainScale x pan, up to 2.0), the source position in Q16
+	const int32_t gl = (int32_t)(kGainScale * d.pan * 16384.0f), gr = (int32_t)(kGainScale * 16384.0f) - gl;
+	const uint32_t step = (uint32_t)(((uint64_t)n << 16) / outN);
+	const int16_t* st = d.stage;
+	const uint32_t last = n - 1;
+	uint32_t p = 0;
+	for (uint32_t sub = 0; sub < subs; sub++) {
+		const uint32_t slot = (first + sub) % kMixSubs;
+		int32_t* a = acc[slot];
 		used[slot] = true;
+		for (uint32_t k = 0; k < sn; k++, p += step) {
+			const uint32_t i = p >> 16;
+			const int32_t s0 = st[i], s1 = st[i < last ? i + 1 : i];
+			const int32_t smp = s0 + (((s1 - s0) * (int32_t)((p & 0xFFFF) >> 1)) >> 15);
+			a[2 * k] += (smp * gl) >> 14;
+			a[2 * k + 1] += (smp * gr) >> 14;
+		}
 	}
 }
 
@@ -975,10 +985,11 @@ extern "C" void port_dspmix_setup(uint32_t nvoices, void* voices, const uint32_t
 	first = false;
 	const char* e = getenv("SMS_AUDIO_TRACE");
 	g.trace = e && *e && strcmp(e, "0") != 0;
+	if ((e = getenv("SMS_AUDIO_SOFTMIX")) && *e)
+		s_allSoft = strcmp(e, "0") != 0;
 #if SMS3DS_DEBUG
 	if ((e = getenv("SMS_AUDIO_PREROLL_MS")) && *e)
 		s_preroll = (float)atoi(e) / 1000.0f;
-	s_allSoft = (e = getenv("SMS_AUDIO_SOFTMIX")) && *e && strcmp(e, "0") != 0;
 	// SMS_AUDIO_DUMP=path: the meter's mix as a WAV (float, before saturation), for scripts/audio-levels.py
 	const char* dump = getenv("SMS_AUDIO_DUMP");
 	if (dump && *dump && !g.dump) {
@@ -991,8 +1002,12 @@ extern "C" void port_dspmix_setup(uint32_t nvoices, void* voices, const uint32_t
 		fprintf(stderr, "[audio] dumping the mix to %s%s\n", dump, g.dump ? "" : ": cannot open it");
 	}
 #endif
-	fprintf(stderr, "[audio] voices played by the 3DS DSP (ndsp, %d channels and a software mix)%s\n", kVoiceChans,
-	        g.ndspOk ? "" : ": ndsp is not running, silent");
+	if (s_allSoft)
+		fprintf(stderr, "[audio] voices mixed on the CPU, played by the 3DS DSP (ndsp)%s\n",
+		        g.ndspOk ? "" : ": ndsp is not running, silent");
+	else
+		fprintf(stderr, "[audio] voices played by the 3DS DSP (ndsp, %d channels and a software mix)%s\n",
+		        kVoiceChans, g.ndspOk ? "" : ": ndsp is not running, silent");
 }
 
 extern "C" void port_dspmix_set_aram(port_dspmix_aram_fn fn) { g.aram = fn; }
