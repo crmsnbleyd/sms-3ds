@@ -136,6 +136,8 @@ u32 s_bottomFlags;  // the same into the bottom screen's format (the console's R
 void freeRetired();
 void storeWriteBacks();
 
+void drawBottomBackground();
+
 void beginFrame()
 {
 	if (s_inFrame)
@@ -161,10 +163,12 @@ void beginFrame()
 	const u64 twb = svcGetSystemTick();
 	g_gxCount[SMS3DS_CNT_WBUS] += (uint32_t)((twb - tw) / (SYSCLOCK_ARM11 / 1000000));
 	g_gxCount[SMS3DS_CNT_BEGINWAITUS] += (uint32_t)((tw - t0) / (SYSCLOCK_ARM11 / 1000000));
-	if (s_bottomOut)  // black where the HUD draws nothing
+	if (s_bottomOut)
 		C3D_RenderTargetClear(s_bottom, C3D_CLEAR_ALL, 0x000000FF, s_clearDepth);
-	C3D_FrameDrawOn(drawTarget());
 	s_vertUsed = s_idxUsed = 0;
+	if (s_bottomOut)  // the HUD's backdrop
+		drawBottomBackground();
+	C3D_FrameDrawOn(drawTarget());
 	if (s_arenaFull) {
 		s_arenaGen++;
 		s_arenaVertUsed = s_arenaIdxUsed = 0;
@@ -290,6 +294,62 @@ void applyScissor()
 	const u32 y0 = (u32)clampTo(floorf(W - col1), bar, W - bar);
 	const u32 y1 = (u32)clampTo(ceilf(W - col0), (float)y0, W - bar);
 	C3D_SetScissor(GPU_SCISSOR_NORMAL, x0, y0, x1, y1);
+}
+
+// The bottom screen's background (texture.cpp bottomBackgroundTexture), over the whole target,
+// before the HUD draws on it.
+void drawBottomBackground()
+{
+	C3D_Tex* t = bottomBackgroundTexture();
+	if (!t || s_vertUsed + 4 * sizeof(OutVertex) > kVertRing || s_idxUsed + 6 * sizeof(uint16_t) > kIdxRing)
+		return;
+	OutVertex* v = (OutVertex*)(s_vertRing + s_vertUsed);
+	uint16_t* ix = (uint16_t*)(s_idxRing + s_idxUsed);
+	for (int i = 0; i < 4; i++) {  // clip x runs down the screen's height, clip y across its width
+		OutVertex& o = v[i];
+		o.pos[0] = (i & 2) ? -1.0f : 1.0f;  // top, bottom
+		o.pos[1] = (i & 1) ? -1.0f : 1.0f;  // left, right
+		o.pos[2] = -0.5f;
+		o.pos[3] = 1.0f;
+		memset(o.clr, 255, 4);
+		memset(o.tc, 0, sizeof o.tc);
+		o.tc[0][0] = (i & 1) ? 1.0f : 0.0f;
+		o.tc[0][1] = (i & 2) ? 1.0f : 0.0f;
+	}
+	const uint16_t q[6] = {0, 1, 2, 1, 3, 2};
+	memcpy(ix, q, sizeof q);
+	s_vertUsed += (4 * sizeof(OutVertex) + 15) & ~(size_t)15;
+	s_idxUsed += (6 * sizeof(uint16_t) + 15) & ~(size_t)15;
+
+	C3D_FrameDrawOn(s_bottom);
+	C3D_BindProgram(&s_prog);
+	C3D_AttrInfo* ai = C3D_GetAttrInfo();
+	AttrInfo_Init(ai);
+	AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
+	AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+	AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 3, GPU_FLOAT, 2);
+	AttrInfo_AddLoader(ai, 4, GPU_FLOAT, 2);
+	C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+	C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+	C3D_AlphaTest(false, GPU_ALWAYS, 0);
+	C3D_CullFace(GPU_CULL_NONE);
+	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+	t->param = (t->param & ~GPU_TEXTURE_MODE(7)) | GPU_TEXTURE_MODE(GPU_TEX_2D);
+	C3D_TexBind(0, t);
+	for (int st = 0; st < 6; st++) {
+		C3D_TexEnv* e = C3D_GetTexEnv(st);
+		C3D_TexEnvInit(e);
+		C3D_TexEnvSrc(e, C3D_Both, st == 0 ? GPU_TEXTURE0 : GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+		C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+	}
+	C3D_BufInfo* bi = C3D_GetBufInfo();
+	BufInfo_Init(bi);
+	BufInfo_Add(bi, v, sizeof(OutVertex), 5, 0x43210);
+	C3D_DrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_SHORT, ix);
+	C3D_BindProgram(&s_gxProg);
+	vtxInvalidate();
+	s_lastPixelValid = false;
 }
 
 // Solid rectangles in PICA clip space ({x0, x1, y0, y1}; x along the screen's height, y along its

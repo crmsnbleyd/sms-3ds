@@ -9,6 +9,7 @@
 #include <3ds.h>
 #include <citro3d.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unordered_map>
@@ -263,7 +264,27 @@ struct Entry {
 std::unordered_map<Key, Entry, KeyHash> s_cache;
 std::vector<uint8_t> s_rgba;
 size_t s_cacheBytes;
-const size_t kCacheBudget = 12u << 20;
+// Converted textures live in linear memory, which the renderer's rings, the display-list arena,
+// the audio ring and EFB write-backs share: the budget is what was free when the cache started,
+// less a reserve, at most 12 MiB. When a texture cannot be made all the same (linear memory ran
+// out: HUD pieces were drawn white), textures not used for a few frames are freed and it is tried
+// again (makeTexture).
+size_t s_cacheBudget;
+size_t cacheBudget()
+{
+	if (!s_cacheBudget) {
+		const size_t free = linearSpaceFree(), reserve = 2u << 20;
+		size_t b = free > reserve ? free - reserve : 0;
+		if (b > (12u << 20))
+			b = 12u << 20;
+		if (b < (4u << 20))
+			b = 4u << 20;
+		s_cacheBudget = b;
+		fprintf(stderr, "[gx3ds] texture cache budget %lu KiB (linear free %lu KiB)\n",
+		        (unsigned long)(b >> 10), (unsigned long)(free >> 10));
+	}
+	return s_cacheBudget;
+}
 C3D_Tex s_white;
 // Unchanged textures are re-hashed this often (sms-pc-port: kRecheckFrames, 8). Writes the 3DS build
 // does not stamp are rare (DVD, ARAM DMA and the game's cache flushes all stamp), and hashing every
@@ -271,10 +292,11 @@ C3D_Tex s_white;
 const uint32_t kTexRecheckFrames = 120;
 bool s_whiteInit;
 
-void evictOld()
+// Frees textures not used for `minAge` display frames (while over budget, or all of them).
+void evictOlderThan(uint32_t minAge, bool all)
 {
-	for (auto it = s_cache.begin(); it != s_cache.end() && s_cacheBytes > kCacheBudget;) {
-		if (g_displayFrames - it->second.usedFrame > 30) {  // not used for half a second: not in flight
+	for (auto it = s_cache.begin(); it != s_cache.end() && (all || s_cacheBytes > cacheBudget());) {
+		if (g_displayFrames - it->second.usedFrame > minAge) {  // the GPU is done with it
 			if (it->second.valid)
 				C3D_TexDelete(&it->second.tex);
 			s_cacheBytes -= it->second.texBytes;
@@ -283,6 +305,17 @@ void evictOld()
 			++it;
 		}
 	}
+}
+
+void evictOld() { evictOlderThan(30, false); }  // half a second: not in flight
+
+// C3D_TexInit, freeing textures not used for the last few frames when linear memory has run out.
+bool makeTexture(C3D_Tex* t, uint32_t w, uint32_t h, GPU_TEXCOLOR f)
+{
+	if (C3D_TexInit(t, (u16)w, (u16)h, f))
+		return true;
+	evictOlderThan(3, true);
+	return C3D_TexInit(t, (u16)w, (u16)h, f);
 }
 
 inline void storeTexel(uint8_t* dst, GPU_TEXCOLOR pf, uint32_t o, const uint8_t* c)
@@ -352,7 +385,7 @@ bool convert(Entry& e, const uint8_t* src, uint32_t bytes, uint32_t fmt, uint32_
 		return true;
 	}
 	if (!e.valid) {
-		if (!C3D_TexInit(&e.tex, (u16)pw, (u16)ph, pf))
+		if (!makeTexture(&e.tex, pw, ph, pf))
 			return false;
 		e.valid = true;
 		e.texBytes = e.tex.size;
@@ -403,6 +436,20 @@ C3D_Tex* withSampler(C3D_Tex* t, uint32_t mode0)
 }
 }  // namespace
 
+// A map drawn white instead of its texture: logged (the first few), and counted.
+volatile uint32_t sms3ds_gx_white_maps;
+void noteWhite(const char* why, const void* ptr, uint32_t fmt, uint32_t w, uint32_t h)
+{
+	sms3ds_gx_white_maps = sms3ds_gx_white_maps + 1;
+	static int logged;
+	if (logged < 12) {
+		logged++;
+		fprintf(stderr, "[gx3ds] texture %p fmt %lu %lux%lu drawn white: %s (linear free %lu KiB)\n", ptr,
+		        (unsigned long)fmt, (unsigned long)w, (unsigned long)h, why,
+		        (unsigned long)(linearSpaceFree() >> 10));
+	}
+}
+
 // The texture for GX map `map` with its sampler state applied: an EFB copy drawn there, the
 // texture converted from RAM, or an 8x8 white texture.
 C3D_Tex* textureForMap(int map, const TexCmp& cmp)
@@ -420,8 +467,10 @@ C3D_Tex* textureForMap(int map, const TexCmp& cmp)
 	const uint8_t* ptr = g.texImage[map];
 	if (C3D_Tex* ct = copyTexture(ptr))
 		return withSampler(ct, mode0);  // (a compare against an EFB copy is not baked: approximated)
-	if (!ptr || !levelBytes(fmt, w, h))
+	if (!ptr || !levelBytes(fmt, w, h)) {
+		noteWhite("no image", ptr, fmt, w, h);
 		return &s_white;
+	}
 
 	const bool ci = fmt == 8 || fmt == 9 || fmt == 10;
 	Key key{ptr, fmt, w, h, ci ? (tlutReg & 0x3FF) : 0, ci ? ((tlutReg >> 10) & 3) : 0, cmp};
@@ -437,15 +486,59 @@ C3D_Tex* textureForMap(int map, const TexCmp& cmp)
 		e.checkedClock = writeClock();
 		e.checkedFrame = g_displayFrames;
 		if (!e.valid || hsh != e.hash || e.bytes != bytes) {
-			if (!convert(e, ptr, bytes, fmt & 15, w, h, tlut, key.tlutFmt, th, cmp))
+			if (!convert(e, ptr, bytes, fmt & 15, w, h, tlut, key.tlutFmt, th, cmp)) {
+				noteWhite("not converted", ptr, fmt, w, h);
 				return &s_white;
+			}
 			e.hash = hsh;
 			e.bytes = bytes;
-			if (s_cacheBytes > kCacheBudget)
+			if (s_cacheBytes > cacheBudget())
 				evictOld();
 		}
 	}
 	return withSampler(&e.tex, mode0);
+}
+
+// The bottom screen's background behind the HUD: a calm sea, generated here (no game imagery).
+// A vertical gradient from sea blue to deep blue, faint wavy bands of light and slightly darker
+// edges; texture coordinates run like GX's (t = 0 at the top).
+C3D_Tex* bottomBackgroundTexture()
+{
+	static C3D_Tex tex;
+	static int state;  // 0 not made, 1 made, -1 failed
+	if (state)
+		return state > 0 ? &tex : nullptr;
+	const uint32_t n = 256;
+	if (!makeTexture(&tex, n, n, GPU_RGB565)) {
+		state = -1;
+		return nullptr;
+	}
+	C3D_TexSetFilter(&tex, GPU_LINEAR, GPU_LINEAR);
+	C3D_TexSetWrap(&tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+	const float top[3] = {38.0f, 112.0f, 168.0f}, bottom[3] = {9.0f, 38.0f, 82.0f};
+	uint8_t* dst = (uint8_t*)tex.data;
+	for (uint32_t y = 0; y < n; y++) {
+		const float v = (y + 0.5f) / n;
+		for (uint32_t x = 0; x < n; x++) {
+			const float u = (x + 0.5f) / n;
+			// wavy horizontal bands of light, brighter towards the surface
+			const float wave = sinf(6.2831853f * (v * 5.0f + 0.12f * sinf(6.2831853f * (u * 1.3f + v * 0.7f))));
+			const float band = (wave > 0.0f ? wave * wave * wave : 0.0f) * (0.10f * (1.0f - v) + 0.03f);
+			// darker towards the edges
+			const float du = u - 0.5f, dv = v - 0.45f;
+			const float vignette = 1.0f - 0.35f * (du * du + dv * dv);
+			uint8_t c[4] = {0, 0, 0, 255};
+			for (int k = 0; k < 3; k++) {
+				const float base = top[k] + (bottom[k] - top[k]) * v;
+				float val = (base + 255.0f * band) * vignette;
+				c[k] = (uint8_t)(val < 0.0f ? 0.0f : val > 255.0f ? 255.0f : val);
+			}
+			storeTexel(dst, GPU_RGB565, tiled(x, n - 1 - y, n), c);
+		}
+	}
+	C3D_TexFlush(&tex);
+	state = 1;
+	return &tex;
 }
 
 // THP movies draw their frames as three I8 textures combined by TEV stages with a signed register
@@ -475,7 +568,7 @@ C3D_Tex* yuvTexture(const uint8_t* yp, const uint8_t* up, const uint8_t* vp, uin
 	if (!texOk || tex.width != pw || tex.height != ph) {
 		if (texOk)
 			C3D_TexDelete(&tex);
-		texOk = C3D_TexInit(&tex, (u16)pw, (u16)ph, GPU_RGB565);  // linear memory: written here
+		texOk = makeTexture(&tex, pw, ph, GPU_RGB565);  // linear memory: written here
 		if (!texOk)
 			return nullptr;
 		C3D_TexSetFilter(&tex, GPU_LINEAR, GPU_LINEAR);
