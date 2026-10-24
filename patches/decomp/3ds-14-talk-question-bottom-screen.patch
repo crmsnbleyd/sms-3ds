@@ -1,6 +1,6 @@
 --- a/src/GC2D/Talk2D2.cpp
 +++ b/src/GC2D/Talk2D2.cpp
-@@ -28,6 +28,15 @@
+@@ -28,6 +28,16 @@
  #include <JSystem/J2D/J2DPicture.hpp>
  #include <JSystem/J2D/J2DScreen.hpp>
  #include <JSystem/J2D/J2DTextBox.hpp>
@@ -12,11 +12,12 @@
 +extern "C" void GXPC_BottomPlain(void);
 +extern "C" int sms3ds_touch_tap(int* x, int* y);
 +extern "C" volatile int sms3ds_talk_bottom_all;  // debug: every page there (stubs_3ds.cpp)
++extern "C" volatile int sms3ds_talk_state[4];    // debug: board, selected value, mode, message (drawn last)
 +#endif
  #include <JSystem/JUtility/JUTPoint.hpp>
  #include <JSystem/JUtility/JUTResFont.hpp>
  #include <JSystem/JUtility/JUTTexture.hpp>
-@@ -937,6 +946,28 @@
+@@ -937,6 +947,28 @@
  		}
  	} else if (mSelectPane->isVisible()) {
  		u32 meaning = mGamePad->mEnabledFrameMeaning;
@@ -45,13 +46,17 @@
  
  		if ((meaning & TMarioGamePad::MEANING_0x80000)
  		    && mSelectedValue == 1) {
-@@ -1263,6 +1294,18 @@
+@@ -1263,6 +1295,22 @@
  	if (cue & CUE_DRAW) {
  		switch (gpMarDirector->unk124) {
  		case 2: {
 +#ifdef __3DS__
 +			// a question: the window on the bottom screen, in its middle, on a plain background
 +			const bool bottom = !mIsBoard && (mSelectedValue != -1 || sms3ds_talk_bottom_all);
++			sms3ds_talk_state[0] = mIsBoard;
++			sms3ds_talk_state[1] = mSelectedValue;
++			sms3ds_talk_state[2] = (int)mTalkMode;
++			sms3ds_talk_state[3] = (int)mMessageID;
 +			const int baseX = bottom ? 260 : mBaseX, baseY = bottom ? 229 : mBaseY;
 +			const s16 baseRot = bottom ? -18 : mBaseRotation;
 +			if (bottom) {
@@ -64,7 +69,7 @@
  			ReInitializeGX();
  			SMS_DrawInit();
  
-@@ -1296,12 +1339,21 @@
+@@ -1296,12 +1344,21 @@
  				if (mIsBoard) {
  					mBoardScreen->draw(0, 0, &ortho);
  				} else {

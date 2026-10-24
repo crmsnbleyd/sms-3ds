@@ -66,4 +66,6 @@ extern "C" volatile int sms3ds_grass_nocull;
 // (Talk2D2.cpp, patches/decomp/3ds-14), to check the layout where no question is at hand.
 extern "C" volatile int sms3ds_talk_bottom_all;
 volatile int sms3ds_talk_bottom_all;
+extern "C" volatile int sms3ds_talk_state[4];  // the talk window as last drawn (Talk2D2.cpp)
+volatile int sms3ds_talk_state[4];
 volatile int sms3ds_grass_nocull;

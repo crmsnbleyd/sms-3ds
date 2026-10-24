@@ -1,0 +1,121 @@
+--- a/src/GC2D/CardSave.cpp
++++ b/src/GC2D/CardSave.cpp
+@@ -26,7 +26,49 @@
+ #include <MSound/MSoundBGM.hpp>
+ #ifdef TARGET_PC
+ #include <sms_modhook.h>
++#ifdef __3DS__
++// The 3DS draws these message boxes (save, continue, "hear my explanation again?") on the bottom
++// screen, as HUD (platform3ds/gx3ds/render.cpp shows EFB x 0-640, y 0-448 there at half size, 8 rows
++// down) on a plain background, and a tap on a choice picks it as the stick and A do.
++extern "C" void GXPC_SetHud(int on);
++extern "C" void GXPC_BottomPlain(void);
++extern "C" int sms3ds_touch_tap(int* x, int* y);
++
++// A new tap on one of `n` choices (the nearest, within a margin): its index, else -1.
++static int sms3dsTappedChoice(J2DPane* const* panes, int n)
++{
++	int x, y;
++	if (!sms3ds_touch_tap(&x, &y))
++		return -1;
++	const int ex = x * 2, ey = y * 2 - 16, slack = 24;
++	int best = -1, bestDist = 0x7FFFFFFF;
++	for (int i = 0; i < n; i++) {
++		const JUTRect& r = panes[i]->getGlobalBounds();
++		if (ex < r.x1 - slack || ex > r.x2 + slack || ey < r.y1 - slack || ey > r.y2 + slack)
++			continue;
++		const int dx = ex - (r.x1 + r.x2) / 2, dy = ey - (r.y1 + r.y2) / 2;
++		const int dist = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
++		if (dist < bestDist) {
++			bestDist = dist;
++			best     = i;
++		}
++	}
++	return best;
++}
++
++// After a choice prompt reads its input: a tapped choice, selected and confirmed (A).
++#define SMS3DS_TAP_CHOICE(input, ...)                                          \
++	do {                                                                       \
++		J2DPane* const sms3dsChoices[] = { __VA_ARGS__ };                      \
++		const int sms3dsTapped = sms3dsTappedChoice(                           \
++		    sms3dsChoices, sizeof sms3dsChoices / sizeof sms3dsChoices[0]);    \
++		if (sms3dsTapped >= 0) {                                               \
++			unk2E9 = (s8)sms3dsTapped;                                         \
++			input  = 0x20;                                                     \
++		}                                                                      \
++	} while (0)
+ #endif
++#endif
+ 
+ extern JPAEmitterManager* gpEmitterManager4D2;
+ 
+@@ -653,6 +695,9 @@
+ 	case 2: {
+ 		s8 old    = getUnk2E9();
+ 		u32 input = unk270->mEnabledFrameMeaning;
++#ifdef __3DS__
++		SMS3DS_TAP_CHOICE(input, unkFC->getPane(), unk100->getPane());
++#endif
+ 
+ 		if (input & 0x20) {
+ 			if (unk44 != nullptr)
+@@ -904,6 +949,9 @@
+ 	case 2: {
+ 		s8 old    = getUnk2E9();
+ 		u32 input = unk270->mEnabledFrameMeaning;
++#ifdef __3DS__
++		SMS3DS_TAP_CHOICE(input, unkFC->getPane(), unk100->getPane());
++#endif
+ 
+ 		if (input & 0x20) {
+ 			if (unk44 != nullptr)
+@@ -1231,6 +1279,9 @@
+ 	case 2: {
+ 		s8 oldSelect = getUnk2E9();
+ 		u32 input    = unk270->mEnabledFrameMeaning;
++#ifdef __3DS__
++		SMS3DS_TAP_CHOICE(input, unk264[0], unk264[1]);
++#endif
+ 
+ 		if (input & 0x20) {
+ 			gpMSound->startSoundSystemSE(0x481CU, 0, nullptr, 0);
+@@ -1345,6 +1396,9 @@
+ 	case 2: {
+ 		s8 oldSelect = getUnk2E9();
+ 		u32 input    = unk270->mEnabledFrameMeaning;
++#ifdef __3DS__
++		SMS3DS_TAP_CHOICE(input, unk198[0][1], unk198[1][1]);
++#endif
+ 
+ 		if (input & 0x20) {
+ 			gpMSound->startSoundSystemSE(0x481CU, 0, nullptr, 0);
+@@ -1513,6 +1567,9 @@
+ 	case 2: {
+ 		s8 oldSelect = getUnk2E9();
+ 		u32 input    = unk270->mEnabledFrameMeaning;
++#ifdef __3DS__
++		SMS3DS_TAP_CHOICE(input, unk1E8[0][1], unk1E8[1][1], unk1E8[2][1]);
++#endif
+ 
+ 		if (input & 0x20) {
+ 			gpMSound->startSoundSystemSE(0x481CU, 0, nullptr, 0);
+@@ -2316,11 +2373,18 @@
+ void TCardSave::execIssueGX_(JDrama::TGraphics* param_1)
+ {
+ 	const JDrama::TRect& scissorRect = param_1->getScissor();
++#ifdef __3DS__
++	GXPC_SetHud(1);
++	GXPC_BottomPlain();
++#endif
+ 	{
+ 		J2DOrthoGraph graph(param_1->getViewport());
+ 		graph.setup2D();
+ 		unk14->draw(0, 0, &graph);
+ 	}
++#ifdef __3DS__
++	GXPC_SetHud(0);
++#endif
+ 
+ 	param_1->setScissor(scissorRect);
+ }

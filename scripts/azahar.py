@@ -144,6 +144,7 @@ def cmd_hud():
         ("gx waits us: queue / fence / boundary; fences", "%d / %d / %d; %d" % read(c, "sms3ds_gx_waits", "4I")),
         ("game HUD: batches / verts / us", "%d / %d / %d" % read(c, "sms3ds_gx_hud", "3I")),
         ("approx why", "%05x" % u("sms3ds_gx_approx_why")),
+        ("talk: board / selected / mode / message", "%d / %d / %d / %d" % read(c, "sms3ds_talk_state", "4i")),
     ]
     st = rpc().perf_stats()
     if st:
