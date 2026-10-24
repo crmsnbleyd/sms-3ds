@@ -298,9 +298,18 @@ void applyScissor()
 }
 
 // The bottom screen's background (texture.cpp bottomBackgroundTexture), over the whole target,
-// before the HUD draws on it.
+// before the HUD draws on it; none (black) while the game asks for a plain one (GXPC_BottomPlain,
+// each frame it draws a question there), until a few frames after it stops.
+volatile uint32_t s_plainRequests;
 void drawBottomBackground()
 {
+	static uint32_t seen, lastFrame;
+	if (s_plainRequests != seen) {
+		seen = s_plainRequests;
+		lastFrame = g_displayFrames;
+	}
+	if (seen && g_displayFrames - lastFrame <= 3)
+		return;
 	C3D_Tex* t = bottomBackgroundTexture();
 	if (!t || s_vertUsed + 4 * sizeof(OutVertex) > kVertRing || s_idxUsed + 6 * sizeof(uint16_t) > kIdxRing)
 		return;
@@ -1869,6 +1878,11 @@ int sms3ds_gx_draw_yuv(const void* y, const void* u, const void* v, int tw, int 
 	else
 		gx::drawYuvFrame(a);
 	return 1;
+}
+
+void GXPC_BottomPlain(void)
+{
+	gx3ds::s_plainRequests = gx3ds::s_plainRequests + 1;
 }
 
 void GXPC_SetHud(int on)

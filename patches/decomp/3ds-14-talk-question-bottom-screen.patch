@@ -1,0 +1,88 @@
+--- a/src/GC2D/Talk2D2.cpp
++++ b/src/GC2D/Talk2D2.cpp
+@@ -28,6 +28,15 @@
+ #include <JSystem/J2D/J2DPicture.hpp>
+ #include <JSystem/J2D/J2DScreen.hpp>
+ #include <JSystem/J2D/J2DTextBox.hpp>
++#ifdef __3DS__
++// The 3DS draws a talk page that asks a question (a yes/no choice) on the bottom screen, as HUD
++// (platform3ds/gx3ds/render.cpp shows EFB x 0-640, y 0-448 there at half size, 8 rows down) on a
++// plain background, and a tap on a choice picks it as the stick and A do (checkControler).
++extern "C" void GXPC_SetHud(int on);
++extern "C" void GXPC_BottomPlain(void);
++extern "C" int sms3ds_touch_tap(int* x, int* y);
++extern "C" volatile int sms3ds_talk_bottom_all;  // debug: every page there (stubs_3ds.cpp)
++#endif
+ #include <JSystem/JUtility/JUTPoint.hpp>
+ #include <JSystem/JUtility/JUTResFont.hpp>
+ #include <JSystem/JUtility/JUTTexture.hpp>
+@@ -937,6 +946,28 @@
+ 		}
+ 	} else if (mSelectPane->isVisible()) {
+ 		u32 meaning = mGamePad->mEnabledFrameMeaning;
++#ifdef __3DS__
++		// a tap on a choice: that one, confirmed (its cursor as the stick moves it)
++		int tx, ty;
++		if (sms3ds_touch_tap(&tx, &ty)) {
++			const int ex = tx * 2, ey = ty * 2 - 16, slack = 24;
++			const JUTRect& r = mSelectPane->getGlobalBounds();
++			if (ex >= r.x1 - slack && ex <= r.x2 + slack && ey >= r.y1 - slack && ey <= r.y2 + slack) {
++				const JUTRect& c0 = mSelectCursor[0]->getGlobalBounds();
++				const JUTRect& c1 = mSelectCursor[1]->getGlobalBounds();
++				const int d0 = ey - (c0.y1 + c0.y2) / 2, d1 = ey - (c1.y1 + c1.y2) / 2;
++				const s8 pick = (d0 < 0 ? -d0 : d0) <= (d1 < 0 ? -d1 : d1) ? 0 : 1;
++				if (pick != mSelectedValue) {
++					mSelectedValue = pick;
++					mSelectCursor[1 - pick]->setAlpha(254);
++					mSelectCursor[1 - pick]->hide();
++					mSelectCursor[pick]->show();
++				}
++				meaning = (meaning & ~(TMarioGamePad::MEANING_0x80000 | TMarioGamePad::MEANING_0x100000))
++				          | TMarioGamePad::MEANING_0x20000;
++			}
++		}
++#endif
+ 
+ 		if ((meaning & TMarioGamePad::MEANING_0x80000)
+ 		    && mSelectedValue == 1) {
+@@ -1263,6 +1294,18 @@
+ 	if (cue & CUE_DRAW) {
+ 		switch (gpMarDirector->unk124) {
+ 		case 2: {
++#ifdef __3DS__
++			// a question: the window on the bottom screen, in its middle, on a plain background
++			const bool bottom = !mIsBoard && (mSelectedValue != -1 || sms3ds_talk_bottom_all);
++			const int baseX = bottom ? 260 : mBaseX, baseY = bottom ? 229 : mBaseY;
++			const s16 baseRot = bottom ? -18 : mBaseRotation;
++			if (bottom) {
++				GXPC_SetHud(1);
++				GXPC_BottomPlain();
++				mBasePane->move(baseX, baseY);
++				mBasePane->mRotation = baseRot;
++			}
++#endif
+ 			ReInitializeGX();
+ 			SMS_DrawInit();
+ 
+@@ -1296,12 +1339,21 @@
+ 				if (mIsBoard) {
+ 					mBoardScreen->draw(0, 0, &ortho);
+ 				} else {
++#ifdef __3DS__
++					mBasePane->move(baseX, baseY);
++					mBasePane->mRotation = baseRot;
++#else
+ 					mBasePane->move(mBaseX, mBaseY);
+ 					mBasePane->mRotation = mBaseRotation;
++#endif
+ 					mScreen->draw(0, 0, &ortho);
+ 				}
+ 				break;
+ 			}
++#ifdef __3DS__
++			if (bottom)
++				GXPC_SetHud(0);
++#endif
+ 			break;
+ 		}
+ 		}

@@ -62,4 +62,8 @@ void port_window_icon_init(void) {}
 
 // Debugging (patches/decomp/3ds-11): 1 turns grass culling off, written over Azahar's RPC.
 extern "C" volatile int sms3ds_grass_nocull;
+// Debug (scripts/azahar.py can write it): every talk page on the bottom screen, not only questions
+// (Talk2D2.cpp, patches/decomp/3ds-14), to check the layout where no question is at hand.
+extern "C" volatile int sms3ds_talk_bottom_all;
+volatile int sms3ds_talk_bottom_all;
 volatile int sms3ds_grass_nocull;
