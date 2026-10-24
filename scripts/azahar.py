@@ -138,8 +138,9 @@ def cmd_hud():
         ("tev compiles / xf-only set-ups", "%d / %d" % read(c, "sms3ds_gx_count", "10I")[8:]),
         ("audio: voices / channels / bufs / overruns / no-chan / ndsp frames / dropped / soft-mixed",
          " / ".join(str(x) for x in read(c, "sms3ds_audio_stats", "8I"))),
-        ("audio meter: peak 1 s / all / clipped samples / subframes / starved / jumps",
-         " / ".join(str(x) for x in read(c, "sms3ds_audio_meter", "6I"))),
+        ("audio cpu us per s: last / most", "%d / %d" % read(c, "sms3ds_audio_cpu_us", "2I")),
+        ("audio meter: peak 1 s / all / clipped samples / subframes / starved",
+         " / ".join(str(x) for x in read(c, "sms3ds_audio_meter", "5I"))),
         ("gx waits us: queue / fence / boundary; fences", "%d / %d / %d; %d" % read(c, "sms3ds_gx_waits", "4I")),
         ("game HUD: batches / verts / us", "%d / %d / %d" % read(c, "sms3ds_gx_hud", "3I")),
         ("approx why", "%05x" % u("sms3ds_gx_approx_why")),
@@ -250,10 +251,10 @@ def cmd_plaza(area="1"):
 def cmd_audio(seconds="10"):
     """The level meter once a second: the loudest output sample (dBFS; above 0 the DSP saturates it),
     and what happened in that second: samples past full scale, voice buffers that found their channel
-    played out (gaps), volume steps of 3 dB or more on queued audio."""
+    played out (gaps)."""
     c = rpc()
     prev = read(c, "sms3ds_audio_meter", "8I")
-    print("%4s %8s %8s %8s %8s" % ("s", "peak dB", "clipped", "starved", "jumps"))
+    print("%4s %8s %8s %8s" % ("s", "peak dB", "clipped", "starved"))
     for t in range(int(seconds)):
         time.sleep(1.0)
         m = read(c, "sms3ds_audio_meter", "8I")
@@ -261,7 +262,7 @@ def cmd_audio(seconds="10"):
             print("%4d   (no audio rendered)" % (t + 1))
             continue
         db = 20 * __import__("math").log10(max(m[0], 1) / 32767.0)
-        print("%4d %8.1f %8d %8d %8d" % (t + 1, db, m[2] - prev[2], m[4] - prev[4], m[5] - prev[5]))
+        print("%4d %8.1f %8d %8d" % (t + 1, db, m[2] - prev[2], m[4] - prev[4]))
         prev = m
 
 

@@ -19,7 +19,7 @@ result is `build-3ds-release/sms_3ds.3dsx`. Both are built with the same optimis
 ## Checking the audio
 
 A debug build meters what the 3DS DSP is given: `uv run scripts/azahar.py audio [SECONDS]` prints, once a
-second, the loudest output sample (above 0 dBFS the DSP saturates it), and counts of samples past full scale,
-voice buffers that found their channel already played out (gaps), and 3 dB steps that hit queued audio. With
+second, the loudest output sample (above 0 dBFS the DSP saturates it), and counts of samples past full scale
+and of voice buffers that found their channel already played out (gaps). With
 `SMS_AUDIO_DUMP=sdmc:/3ds/sms-3ds/mix.wav` in the SD card's `settings.txt` it also writes that mix (float,
 before saturation) to the SD card; `uv run scripts/audio-levels.py` summarises the file.

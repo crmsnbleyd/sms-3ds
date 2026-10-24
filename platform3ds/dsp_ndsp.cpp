@@ -32,10 +32,13 @@ volatile uint32_t sms3ds_audio_stats[8];
 // The level meter (debug builds; scripts/azahar.py audio): the loudest output sample of the last
 // second and of all time (32767 is full scale), output samples and subframes past full scale (the DSP
 // saturates them: crackle), voice buffers that found their channel already played out (a gap),
-// volume changes of 3 dB or more that hit audio already queued (a step), subframes metered, and
-// subframes written to SMS_AUDIO_DUMP.
+// (unused), subframes metered, and subframes written to SMS_AUDIO_DUMP.
 extern "C" volatile uint32_t sms3ds_audio_meter[8];
 volatile uint32_t sms3ds_audio_meter[8];
+// CPU time the voices took (decoding, mixing, queueing), in microseconds per second of audio: the
+// last second's and the most in any second so far.
+extern "C" volatile uint32_t sms3ds_audio_cpu_us[2];
+volatile uint32_t sms3ds_audio_cpu_us[2];
 
 namespace {
 
@@ -126,6 +129,16 @@ struct Chan {
 	float rate = -1.0f, mixL = -1.0f, mixR = -1.0f;  // as last set (ndsp calls only on change)
 	uint32_t gen = 0;  // bumped by chanReset: a buffer queued for its previous use is not added
 	uint32_t queuedAt = 0;  // the render call that last queued a buffer, + 1
+	// The rate and mix of each queued buffer, in queue order (s_paramLock). ndsp applies a channel's
+	// rate and mix to whatever it plays from its next frame on, so they are set by the frame callback
+	// (onDspFrame) as playback reaches the buffer they belong to, not when it is queued (40 ms and
+	// more earlier: pitch changes were applied to the wrong audio, which crackled).
+	struct Params {
+		uint16_t seq;
+		uint32_t nsamples;
+		float rate, mixL, mixR;
+	} params[kBufs];
+	uint32_t pHead = 0, pTail = 0;  // entries pHead..pTail-1 (mod kBufs)
 	ndspWaveBuf wb[kBufs];
 	int next = 0;
 };
@@ -382,7 +395,9 @@ struct Pending {
 	int chan;
 	uint32_t gen;
 	ndspWaveBuf* wb;
+	float rate, mixL, mixR;  // for a voice channel's buffer (the software mix's are fixed: rate < 0)
 };
+LightLock s_paramLock;
 Pending s_pending[64];
 int s_npending;
 
@@ -410,10 +425,64 @@ void addPending()
 	s_flushFrom = s_ringHead;
 	for (int i = 0; i < s_npending; i++) {
 		const Pending& p = s_pending[i];
-		if (g.chan[p.chan].gen == p.gen)
-			ndspChnWaveBufAdd(p.chan, p.wb);
+		Chan& ch = g.chan[p.chan];
+		if (ch.gen != p.gen)
+			continue;
+		LightLock_Lock(&s_paramLock);
+		ndspChnWaveBufAdd(p.chan, p.wb);  // gives the buffer its sequence number
+		if (p.rate > 0.0f) {
+			if (ch.pTail - ch.pHead >= (uint32_t)kBufs)
+				ch.pHead++;  // cannot happen: one entry per queued buffer
+			ch.params[ch.pTail++ % kBufs] = Chan::Params{p.wb->sequence_id, p.wb->nsamples, p.rate, p.mixL, p.mixR};
+		}
+		LightLock_Unlock(&s_paramLock);
 	}
 	s_npending = 0;
+}
+
+void applyParams(int c, const Chan::Params& p)
+{
+	Chan& ch = g.chan[c];
+	if (p.rate != ch.rate) {
+		ch.rate = p.rate;
+		ndspChnSetRate(c, p.rate);
+	}
+	if (p.mixL != ch.mixL || p.mixR != ch.mixR) {
+		ch.mixL = p.mixL;
+		ch.mixR = p.mixR;
+		float mix[12] = {};
+		mix[0] = p.mixL;
+		mix[1] = p.mixR;
+		ndspChnSetMix(c, mix);
+	}
+}
+
+// ndsp's frame callback (its thread, after it read the channels' state and before it sends their
+// updates for the next frame of 160 output samples): each voice channel gets the rate and mix of
+// the buffer that plays most of that frame.
+void onDspFrame(void*)
+{
+	const float kFrameHalf = 80.0f, kNdspRate = 32728.5f;
+	LightLock_Lock(&s_paramLock);
+	for (int c = 0; c < kVoiceChans; c++) {
+		Chan& ch = g.chan[c];
+		if (ch.pHead == ch.pTail)
+			continue;
+		const uint16_t cur = ndspChnGetWaveBufSeq(c);
+		uint32_t i = ch.pHead;
+		while (i != ch.pTail && ch.params[i % kBufs].seq != cur)
+			i++;
+		if (i == ch.pTail) {  // nothing of ours playing yet: the first queued buffer starts
+			applyParams(c, ch.params[ch.pHead % kBufs]);
+			continue;
+		}
+		ch.pHead = i;  // the buffers before it have played
+		const Chan::Params& p = ch.params[i % kBufs];
+		const uint32_t pos = ndspChnGetSamplePos(c);
+		const float left = pos < p.nsamples ? (float)(p.nsamples - pos) * kNdspRate / p.rate : 0.0f;
+		applyParams(c, left < kFrameHalf && i + 1 != ch.pTail ? ch.params[(i + 1) % kBufs] : p);
+	}
+	LightLock_Unlock(&s_paramLock);
 }
 bool chanIdle(int c)
 {
@@ -433,7 +502,10 @@ void chanReset(int c)
 		memset(&ch.wb[b], 0, sizeof ch.wb[b]);
 	ch.next = 0;
 	ch.gen++;
+	LightLock_Lock(&s_paramLock);
 	ch.rate = ch.mixL = ch.mixR = -1.0f;
+	ch.pHead = ch.pTail = 0;
+	LightLock_Unlock(&s_paramLock);
 }
 
 // Lets a voice's channel play out what it has queued (a finished one-shot) or stops it at once.
@@ -605,7 +677,7 @@ void submitMix(uint32_t sub)
 	wb.data_pcm16 = dst;
 	wb.nsamples = pad + sn;  // stereo frames
 	wb.looping = false;
-	s_pending[s_npending++] = Pending{kMixChan, ch.gen, &wb};
+	s_pending[s_npending++] = Pending{kMixChan, ch.gen, &wb, -1.0f, 0.0f, 0.0f};
 	ch.next = (ch.next + 1) % kBufs;
 }
 
@@ -685,28 +757,8 @@ void submit(int vi, const Voice& v)
 	wb.data_pcm16 = dst;
 	wb.nsamples = pad + n;
 	wb.looping = false;
-	if (rate != ch.rate) {
-		ch.rate = rate;
-		ndspChnSetRate(d.chan, rate);
-	}
-	const float mixL = kGainScale * d.pan, mixR = kGainScale * (1.0f - d.pan);
-	if (mixL != ch.mixL || mixR != ch.mixR) {
-#if SMS3DS_DEBUG
-		// a side stepping by 3 dB or more (a pan change) on queued audio
-		const auto step = [](float a, float b) {
-			return a >= 0.0f && (a > 0.1f || b > 0.1f) && (b > a * 1.4125f || a > b * 1.4125f);
-		};
-		if ((step(ch.mixL, mixL) || step(ch.mixR, mixR)) && !chanIdle(d.chan))
-			sms3ds_audio_meter[5] = sms3ds_audio_meter[5] + 1;
-#endif
-		ch.mixL = mixL;
-		ch.mixR = mixR;
-		float mix[12] = {};
-		mix[0] = mixL;
-		mix[1] = mixR;
-		ndspChnSetMix(d.chan, mix);
-	}
-	s_pending[s_npending++] = Pending{d.chan, ch.gen, &wb};
+	// the rate and mix go with the buffer (onDspFrame sets them as it starts playing)
+	s_pending[s_npending++] = Pending{d.chan, ch.gen, &wb, rate, kGainScale * d.pan, kGainScale * (1.0f - d.pan)};
 	ch.next = (ch.next + 1) % kBufs;
 	sms3ds_audio_stats[2] = sms3ds_audio_stats[2] + 1;
 }
@@ -865,6 +917,7 @@ extern "C" bool sms3ds_ndsp_init(void)
 {
 	if (R_FAILED(ndspInit()))
 		return false;
+	LightLock_Init(&s_paramLock);
 	ndspSetOutputMode(NDSP_OUTPUT_STEREO);
 	ndspSetOutputCount(1);
 	ndspSetMasterVol(1.0f);
@@ -886,6 +939,7 @@ extern "C" bool sms3ds_ndsp_init(void)
 	}
 	for (int i = 0; i < 64; i++)
 		g.dec[i].chan = -1;
+	ndspSetCallback(onDspFrame, nullptr);
 	g.ndspOk = true;
 	return true;
 }
@@ -946,6 +1000,7 @@ extern "C" void port_dspmix_set_mram(port_dspmix_mram_fn) {}
 
 extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t master)
 {
+	const u64 t0 = svcGetSystemTick();
 	memset(outA, 0, n * sizeof(int16_t));  // the DSP plays the voices; the AI DMA carries silence
 	memset(outB, 0, n * sizeof(int16_t));
 	g.active = 0;
@@ -988,6 +1043,19 @@ extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t
 		if (g.ndspOk) {
 			sms3ds_audio_stats[5] = ndspGetFrameCount();
 			sms3ds_audio_stats[6] = ndspGetDroppedFrames();
+		}
+	}
+	{
+		static u64 ticks;
+		static uint32_t calls;
+		ticks += svcGetSystemTick() - t0;
+		if (++calls >= 400) {  // about a second of audio
+			const uint32_t us = (uint32_t)(ticks / (SYSCLOCK_ARM11 / 1000000));
+			sms3ds_audio_cpu_us[0] = us;
+			if (us > sms3ds_audio_cpu_us[1])
+				sms3ds_audio_cpu_us[1] = us;
+			ticks = 0;
+			calls = 0;
 		}
 	}
 	if (g.trace && ++g.traceTick % 2000 == 0) {
