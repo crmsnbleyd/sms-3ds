@@ -255,7 +255,7 @@ def cmd_audio(seconds="10"):
     played out (gaps)."""
     c = rpc()
     prev = read(c, "sms3ds_audio_meter", "8I")
-    print("%4s %8s %8s %8s" % ("s", "peak dB", "clipped", "starved"))
+    print("%4s %8s %8s %8s %8s" % ("s", "peak dB", "clipped", "starved", "echo"))
     for t in range(int(seconds)):
         time.sleep(1.0)
         m = read(c, "sms3ds_audio_meter", "8I")
@@ -263,7 +263,7 @@ def cmd_audio(seconds="10"):
             print("%4d   (no audio rendered)" % (t + 1))
             continue
         db = 20 * __import__("math").log10(max(m[0], 1) / 32767.0)
-        print("%4d %8.1f %8d %8d" % (t + 1, db, m[2] - prev[2], m[4] - prev[4]))
+        print("%4d %8.1f %8d %8d %8d" % (t + 1, db, m[2] - prev[2], m[4] - prev[4], m[5] - prev[5]))
         prev = m
 
 

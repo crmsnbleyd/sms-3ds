@@ -19,8 +19,8 @@ result is `build-3ds-release/sms_3ds.3dsx`. Both are built with the same optimis
 ## Checking the audio
 
 A debug build meters what the 3DS DSP is given: `uv run scripts/azahar.py audio [SECONDS]` prints, once a
-second, the loudest output sample (above 0 dBFS the DSP saturates it), and counts of samples past full scale
-and of voice buffers that found their channel already played out (gaps). With
+second, the loudest output sample (above 0 dBFS the DSP saturates it), and counts of samples past full scale,
+of voice buffers that found their channel already played out (gaps), and of subframes with an echo. With
 `SMS_AUDIO_DUMP=sdmc:/3ds/sms-3ds/mix.wav` in the SD card's `settings.txt` it also writes that mix (float,
 before saturation) to the SD card; `uv run scripts/audio-levels.py` summarises the file.
 
@@ -36,6 +36,7 @@ Settings the file can change:
 | `SMS_SKIP_INTRO=1` | all | Skip the Nintendo and Dolby logos and the opening movie. |
 | `SMS_WARP=STAGE,EPISODE` | all | Loading file A goes to that stage instead. Stages with no scene on the disc are ignored. |
 | `SMS_AUDIO_SOFTMIX=0` | all | Play each voice on its own DSP channel instead of the CPU's stereo mix. The DSP's own mixing crinkles; this is for comparison. |
+| `SMS_AUDIO_FX=0` | all | No echo (the FX lines), as on sms-pc-port. |
 | `SMS_AUDIO_TRACE=1` | all | Log voice and channel counts every 2000 audio subframes. |
 | `SMS_VI_HZ=RATE` | all | Override the retrace rate (benchmarking). |
 | `SMS_AUDIO_DUMP=sdmc:/3ds/sms-3ds/mix.wav` | debug | Write the meter's mix (float, before saturation) to the SD card (see above). |

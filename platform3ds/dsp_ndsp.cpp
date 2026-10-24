@@ -12,8 +12,8 @@
 // Voice semantics (start, pause, loops with the stored ADPCM history, stop requests halving the
 // volume each subframe, stream ring positions, oscillators) follow dsp_mixer.cpp (MIT, see NOTICE);
 // PROTOCOL.md there has the evidence. Approximations: pitch changes once per queued buffer (up to 7
-// subframes, 17.5 ms) and a pan change reaches audio already queued; the FX (echo) sends and the per-voice filters
-// are not played; the game hears "done" when a one-shot's last sample is decoded, a few frames before
+// subframes, 17.5 ms) and a pan change reaches audio already queued; the per-voice filters are not
+// played (the FX lines' echo is, in the software mix: fxSub); the game hears "done" when a one-shot's last sample is decoded, a few frames before
 // the DSP has played it. Only voices with volume get one of the 24 channels; when more are audible
 // the quietest goes without.
 #include <3ds.h>
@@ -33,7 +33,7 @@ volatile uint32_t sms3ds_audio_stats[8];
 // The level meter (debug builds; scripts/azahar.py audio): the loudest output sample of the last
 // second and of all time (32767 is full scale), output samples and subframes past full scale (the DSP
 // saturates them: crackle), voice buffers that found their channel already played out (a gap),
-// (unused), subframes metered, and subframes written to SMS_AUDIO_DUMP.
+// subframes with an echo (FX return), subframes metered, and subframes written to SMS_AUDIO_DUMP.
 extern "C" volatile uint32_t sms3ds_audio_meter[8];
 volatile uint32_t sms3ds_audio_meter[8];
 // CPU time the voices took (decoding, mixing, queueing), in microseconds per second of audio: the
@@ -100,6 +100,22 @@ enum { kDirectPcm = 0x21 };
 enum { kOscSquare = 0, kOscSaw = 1, kOscSquare25 = 3, kOscPattern1 = 4, kOscPattern0 = 7, kOscPattern0V = 10,
        kOscPattern2 = 11, kOscPattern3 = 12 };
 const uint16_t kBusLeft = 0x0D00, kBusRight = 0x0D60;  // buses 1 and 2: the dry stereo pair
+// Buses 3-6 feed FX lines 0-3 (echo): music's mix configurations send to 3/4, the auto mixer to 5/6.
+const uint16_t kBusFx[4] = {0x0DC0, 0x0E20, 0x0E80, 0x0EE0};
+
+// DSPInterface::FXBuffer, as dsp_mixer.cpp (PROTOCOL.md, FX lines): a delay line in main memory whose
+// output returns to buses (A, B) through an 8-tap FIR, and feeds back into itself with the new sends.
+struct FxLine {
+	uint16_t mode;    // 0 off; bit 0 filters the return, bit 1 the feedback
+	uint16_t length;  // delay in 80-sample subframes
+	uint32_t buffer;  // main-memory delay buffer
+	uint16_t busA;
+	int16_t gainA;    // Q15
+	uint16_t busB;
+	int16_t gainB;
+	int16_t taps[8];  // Q15
+};
+static_assert(sizeof(FxLine) == 0x20, "FXBuffer is 0x20 bytes");
 // The output rate the voices play at. The GameCube's DAC runs at 32028.5 Hz (JASRate.cpp), but the
 // port's AI clock (ai.cpp) has the game make its audio at 32000 samples a second: played at 32028.5
 // a voice's queued audio shrank by 0.9 ms a second until it ran dry (a gap). 1.5 cents lower.
@@ -165,6 +181,8 @@ struct Decoder {
 	uint16_t bufRatio;      // the pitch of the staged samples
 	float prevGain;         // the total gain at the end of the last buffer (the next ramps from it)
 	float pan;              // left share of the total gain, as last audible
+	float wet[4];           // the FX lines' sends as shares of the total gain (master-free: see fxSub)
+	bool hasWet;
 	uint32_t subEnd[kSubPerBuf];  // staged samples at the end of each staged subframe
 	float subGain[kSubPerBuf];    // and the voice's total gain (left + right) there
 	uint32_t lastSub;             // the render call (subframe count) of the last staged subframe
@@ -191,6 +209,13 @@ struct State {
 	uint32_t mixNext;   // the next subframe of the mix to submit
 	uint32_t subN;      // output samples per subframe (80)
 	uint32_t softMixed; // voice buffers mixed on the CPU
+	// echo: the voices' sends to the FX lines by subframe (as mixAcc), and each line's state
+	int32_t wetAcc[kMixSubs][4][kSubMax];
+	FxLine* fx;
+	port_dspmix_mram_fn mram;
+	uint32_t fxBuffer[4], fxLength[4], fxPos[4];
+	int32_t fxHist[4][8];
+	float master;       // the game's master level, for the FX return (the voices' gains carry it)
 	bool ndspOk;
 	int active;
 	uint32_t overruns, unassigned;
@@ -554,7 +579,9 @@ int takeChan(int vi, float loudness)
 // Adds a voice buffer to a stereo mix kept by subframe (the software mix, the level meter): its n
 // samples (volume already ramped) are stretched linearly over the `subs` subframes they were consumed
 // in, ending at d.lastSub, and added with the pan (the volume is in the samples, over kGainScale).
-void accumulate(int32_t (*acc)[2 * kSubMax], bool* used, const Decoder& d, uint32_t n, uint32_t subs)
+// With `wet`, the voice's FX sends go to wetAcc too; acc may then be null (the dry signal plays on a
+// channel of its own).
+void accumulate(int32_t (*acc)[2 * kSubMax], bool* used, bool wet, const Decoder& d, uint32_t n, uint32_t subs)
 {
 	const uint32_t sn = g.subN ? g.subN : 80, outN = subs * sn;
 	const uint32_t first = d.lastSub + 1 - subs;
@@ -562,20 +589,32 @@ void accumulate(int32_t (*acc)[2 * kSubMax], bool* used, const Decoder& d, uint3
 		return;  // already submitted (cannot happen: buffers reach back kSubPerBuf at most)
 	// gains in Q14 (kGainScale x pan, up to 2.0), the source position in Q16
 	const int32_t gl = (int32_t)(kGainScale * d.pan * 16384.0f), gr = (int32_t)(kGainScale * 16384.0f) - gl;
+	int32_t gw[4];
+	int lines[4], nl = 0;
+	for (int j = 0; wet && d.hasWet && j < 4; j++)
+		if ((gw[j] = (int32_t)(kGainScale * d.wet[j] * 16384.0f)) != 0)
+			lines[nl++] = j;
+	if (!acc && !nl)
+		return;
 	const uint32_t step = (uint32_t)(((uint64_t)n << 16) / outN);
 	const int16_t* st = d.stage;
 	const uint32_t last = n - 1;
 	uint32_t p = 0;
 	for (uint32_t sub = 0; sub < subs; sub++) {
 		const uint32_t slot = (first + sub) % kMixSubs;
-		int32_t* a = acc[slot];
-		used[slot] = true;
+		int32_t* a = acc ? acc[slot] : nullptr;
+		if (acc)
+			used[slot] = true;
 		for (uint32_t k = 0; k < sn; k++, p += step) {
 			const uint32_t i = p >> 16;
 			const int32_t s0 = st[i], s1 = st[i < last ? i + 1 : i];
 			const int32_t smp = s0 + (((s1 - s0) * (int32_t)((p & 0xFFFF) >> 1)) >> 15);
-			a[2 * k] += (smp * gl) >> 14;
-			a[2 * k + 1] += (smp * gr) >> 14;
+			if (a) {
+				a[2 * k] += (smp * gl) >> 14;
+				a[2 * k + 1] += (smp * gr) >> 14;
+			}
+			for (int j = 0; j < nl; j++)
+				g.wetAcc[slot][lines[j]][k] += (smp * gw[lines[j]]) >> 14;
 		}
 	}
 }
@@ -583,14 +622,14 @@ void accumulate(int32_t (*acc)[2 * kSubMax], bool* used, const Decoder& d, uint3
 // A voice buffer with no channel of its own (all taken by louder voices) goes into the software mix.
 void softMix(const Decoder& d, uint32_t n, uint32_t subs)
 {
-	accumulate(g.mixAcc, g.mixUsed, d, n, subs);
+	accumulate(g.mixAcc, g.mixUsed, true, d, n, subs);
 	g.softMixed++;
 }
 
 #if SMS3DS_DEBUG
 void meterAdd(const Decoder& d, uint32_t n, uint32_t subs)
 {
-	accumulate(g.meterAcc, g.meterUsed, d, n, subs);
+	accumulate(g.meterAcc, g.meterUsed, false, d, n, subs);
 }
 
 void dumpHeader()
@@ -658,10 +697,120 @@ void meterSub(uint32_t sub)
 }
 #endif
 
-// The software mix's subframe `sub`, onto its channel (nothing when no voice was mixed into it).
+// One subframe of the FX lines (echo), as dsp_mixer.cpp prepare_fx/finish_fx, once every voice's
+// sends to it are in (wetAcc[slot]): each line's delay output, filtered, returns to the stereo pair
+// (into `out`, with the master level), and feeds back into the delay with the new sends. Whether
+// anything came back.
+bool fxSub(uint32_t slot, uint32_t n, int32_t* out)
+{
+	bool any = false;
+	for (int i = 0; i < 4; i++) {
+		int32_t* wet = g.wetAcc[slot][i];
+		const FxLine* f = g.fx ? &g.fx[i] : nullptr;
+		const uint32_t len = f ? (uint32_t)f->length * 80 : 0;
+		int16_t* delay = f && f->mode && f->buffer && len
+		                     ? (g.mram ? g.mram(f->buffer, len) : (int16_t*)(uintptr_t)f->buffer)
+		                     : nullptr;
+		if (!delay) {
+			g.fxBuffer[i] = 0;
+			memset(wet, 0, n * sizeof(int32_t));
+			continue;
+		}
+		if (g.fxBuffer[i] != f->buffer || g.fxLength[i] != len) {
+			fprintf(stderr, "[audio] echo line %d: %lu ms, mode %u, returns %04x x %d / %04x x %d\n", i,
+			        (unsigned long)(len * 1000 / 32000), (unsigned)f->mode, (unsigned)f->busA, (int)f->gainA,
+			        (unsigned)f->busB, (int)f->gainB);
+			g.fxBuffer[i] = f->buffer;
+			g.fxLength[i] = len;
+			g.fxPos[i] = 0;
+			memset(g.fxHist[i], 0, sizeof g.fxHist[i]);
+		}
+		int32_t window[kSubMax + 8];
+		memcpy(window, g.fxHist[i], sizeof g.fxHist[i]);
+		const uint32_t pos = g.fxPos[i];
+		const uint32_t run = len - pos < n ? len - pos : n;  // the delay wraps at most once a subframe
+		int32_t loud = 0;
+		for (uint32_t k = 0; k < run; k++)
+			loud |= window[k + 8] = delay[pos + k];
+		for (uint32_t k = run; k < n; k++)
+			loud |= window[k + 8] = delay[k - run];
+		for (int t = 0; t < 8; t++)
+			loud |= window[t];
+		if (!loud) {  // silent, and nothing new sent: the delay stays as it is (zeros)
+			bool sent = false;
+			for (uint32_t k = 0; k < n && !sent; k++)
+				sent = wet[k] != 0;
+			if (!sent) {
+				g.fxPos[i] = (pos + n) % len;
+				continue;
+			}
+		}
+		memcpy(g.fxHist[i], window + n, sizeof g.fxHist[i]);
+		// the taps' magnitudes sum to under 1.0 (SMS's: 0.95), so the sums fit 32 bits
+		int32_t tapSum = 0;
+		for (int t = 0; t < 8; t++)
+			tapSum += f->taps[t] < 0 ? -f->taps[t] : f->taps[t];
+		const bool narrow = tapSum <= 32767;
+		for (int pass = 0; pass < 2; pass++) {
+			if (f->mode & (1 << pass))
+				for (uint32_t k = 0; k < n; k++) {
+					const int32_t* w = window + k;
+					const int16_t* tp = f->taps;
+					if (narrow) {
+						const int32_t sum = w[0] * tp[0] + w[1] * tp[1] + w[2] * tp[2] + w[3] * tp[3] + w[4] * tp[4] +
+						                    w[5] * tp[5] + w[6] * tp[6] + w[7] * tp[7];
+						window[k] = sat16(sum >> 15);
+					} else {
+						int64_t sum = 0;
+						for (int t = 0; t < 8; t++)
+							sum += (int64_t)w[t] * tp[t];
+						window[k] = sat16((int32_t)(sum >> 15));
+					}
+				}
+			if (pass == 0) {
+				const uint16_t buses[2] = {f->busA, f->busB};
+				const int16_t gains[2] = {f->gainA, f->gainB};
+				for (int r = 0; r < 2; r++) {
+					const int side = buses[r] == kBusLeft ? 0 : buses[r] == kBusRight ? 1 : -1;
+					if (side < 0 || !gains[r])
+						continue;  // returns to other buses (surround) are not played
+					const int32_t gq = (int32_t)(gains[r] * g.master);
+					for (uint32_t k = 0; k < n; k++)
+						out[2 * k + side] += (window[k] * gq) >> 15;
+					any = true;
+				}
+			}
+		}
+		for (uint32_t k = 0; k < run; k++)
+			delay[pos + k] = (int16_t)sat16(window[k] + wet[k]);
+		for (uint32_t k = run; k < n; k++)
+			delay[k - run] = (int16_t)sat16(window[k] + wet[k]);
+		g.fxPos[i] = (pos + n) % len;
+		memset(wet, 0, n * sizeof(int32_t));
+	}
+	return any;
+}
+
+// The software mix's subframe `sub`, with the echo, onto its channel (nothing when silent).
 void submitMix(uint32_t sub)
 {
 	const uint32_t slot = sub % kMixSubs, sn = g.subN;
+	int32_t echo[2 * kSubMax] = {};
+	if (fxSub(slot, sn, echo)) {
+		for (uint32_t k = 0; k < 2 * sn; k++)
+			g.mixAcc[slot][k] += echo[k];
+		g.mixUsed[slot] = true;
+#if SMS3DS_DEBUG
+		bool heard = false;
+		for (uint32_t k = 0; k < 2 * sn; k++) {  // the meter hears it too (meterSub runs after this)
+			g.meterAcc[slot][k] += echo[k];
+			heard = heard || echo[k];
+		}
+		g.meterUsed[slot] = true;
+		if (heard)
+			sms3ds_audio_meter[5] = sms3ds_audio_meter[5] + 1;
+#endif
+	}
 	if (!g.mixUsed[slot])
 		return;
 	g.mixUsed[slot] = false;
@@ -757,6 +906,7 @@ void submit(int vi, const Voice& v)
 	(void)following;
 #endif
 	ch.queuedAt = g.subNow + 1;
+	accumulate(nullptr, nullptr, true, d, n, subs);  // its echo sends: the software mix plays the echo
 	const float rate = is_oscillator(v.sourceType) ? kOutRate : kOutRate * (float)d.bufRatio / 4096.0f;
 	const uint32_t pad = d.queuedAny ? 0 : (uint32_t)(s_preroll * rate);
 	d.queuedAny = true;
@@ -806,9 +956,10 @@ void render_voice(int vi, int n, float master)
 	}
 	g.active++;
 
-	// volumes, as dsp_mixer.cpp: the auto mixer (Q15, sine pan law) or the six sends (Q14); only the
-	// dry pair (buses 1 and 2) is played. Stop requests halve them each subframe until silent.
-	float gl = 0.0f, gr = 0.0f;
+	// volumes, as dsp_mixer.cpp: the auto mixer (Q15, sine pan law) or the six sends (Q14): the dry
+	// pair (buses 1 and 2) and the FX sends (buses 3-6, the echo). Stop requests halve them each
+	// subframe until silent.
+	float gl = 0.0f, gr = 0.0f, wet[4] = {};
 	if (v.amEnabled) {
 		const int32_t cur = v.amVolCurrent, tgt = stopping ? cur / 2 : v.amVolTarget;
 		if (stopping) {
@@ -819,6 +970,10 @@ void render_voice(int vi, int n, float master)
 		const float vol = (float)tgt / 32768.0f;
 		gl = vol * s_panCos[pan];
 		gr = vol * s_panSin[pan];
+		// the reverb send, Q16 (PROTOCOL.md): the front pair to buses 5/6, FX lines 2/3
+		const float fx = (float)v.amFx / 65536.0f;
+		wet[2] = gl * fx;
+		wet[3] = gr * fx;
 		v.amVolCurrent = (uint16_t)tgt;
 	} else {
 		bool released = true;
@@ -833,6 +988,10 @@ void render_voice(int vi, int n, float master)
 				gl += (float)tgt / 16384.0f;
 			else if (m.bus == kBusRight)
 				gr += (float)tgt / 16384.0f;
+			else
+				for (int j = 0; j < 4; j++)
+					if (m.bus == kBusFx[j])
+						wet[j] += (float)tgt / 16384.0f;
 			m.current = (uint16_t)tgt;
 		}
 		if (stopping)
@@ -840,6 +999,15 @@ void render_voice(int vi, int n, float master)
 	}
 	d.gainL = gl > 0.0f ? gl * master : 0.0f;
 	d.gainR = gr > 0.0f ? gr * master : 0.0f;
+	{
+		// the sends as shares of the total (dry, master-scaled) gain, which the staged samples carry
+		const float total = d.gainL + d.gainR;
+		d.hasWet = false;
+		for (int j = 0; j < 4; j++) {
+			d.wet[j] = total > 0.0f && wet[j] > 0.0f ? wet[j] / total : 0.0f;
+			d.hasWet = d.hasWet || d.wet[j] > 0.0f;
+		}
+	}
 	// a buffer plays at one rate: a pitch change of more than ~0.1% starts the next one
 	if (!is_oscillator(v.sourceType) && d.stagedSubs) {
 		const uint32_t a = v.ratio, b = d.bufRatio, diff = a > b ? a - b : b - a;
@@ -955,8 +1123,13 @@ extern "C" bool sms3ds_ndsp_init(void)
 }
 
 extern "C" void port_dspmix_setup(uint32_t nvoices, void* voices, const uint32_t* res_filter,
-                                  const uint32_t* adpcm_filter, void*)
+                                  const uint32_t* adpcm_filter, void* fx_lines)
 {
+	const char* fxEnv = getenv("SMS_AUDIO_FX");  // 0: no echo (as sms-pc-port)
+	g.fx = fxEnv && strcmp(fxEnv, "0") == 0 ? nullptr : (FxLine*)fx_lines;
+	memset(g.fxBuffer, 0, sizeof g.fxBuffer);
+	memset(g.fxHist, 0, sizeof g.fxHist);
+	memset(g.wetAcc, 0, sizeof g.wetAcc);
 	g.voices = (Voice*)voices;
 	g.nvoices = nvoices > 64 ? 64 : nvoices;
 	for (int i = 0; i < 128; i++) {
@@ -1011,7 +1184,7 @@ extern "C" void port_dspmix_setup(uint32_t nvoices, void* voices, const uint32_t
 }
 
 extern "C" void port_dspmix_set_aram(port_dspmix_aram_fn fn) { g.aram = fn; }
-extern "C" void port_dspmix_set_mram(port_dspmix_mram_fn) {}
+extern "C" void port_dspmix_set_mram(port_dspmix_mram_fn fn) { g.mram = fn; }
 
 extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t master)
 {
@@ -1022,6 +1195,7 @@ extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t
 	if (n > 0 && n <= kSubMax)
 		g.subN = (uint32_t)n;
 	const float m = (float)master / 32768.0f;  // Q15 (PROTOCOL.md, Levels)
+	g.master = m;
 	if (g.voices)
 		for (uint32_t i = 0; i < g.nvoices; i++) {
 			Voice& v = g.voices[i];
@@ -1038,10 +1212,11 @@ extern "C" void port_dspmix_render(int16_t* outA, int16_t* outB, int n, uint16_t
 		}
 	// the software mix's subframes no voice buffer can reach any more
 	while (g.ndspOk && g.mixNext + kSubPerBuf <= g.subNow) {
+		submitMix(g.mixNext);
 #if SMS3DS_DEBUG
 		meterSub(g.mixNext);
 #endif
-		submitMix(g.mixNext++);
+		g.mixNext++;
 	}
 	g.subNow++;
 	if (g.ndspOk)
